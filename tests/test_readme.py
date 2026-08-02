@@ -41,6 +41,46 @@ def _find_readme():
     return None
 
 
+def _award(**kw):
+    """An otherwise-valid Award, with overrides. See tests/test_schema.py."""
+    from cdfifund import Award
+
+    d = dict(
+        award_id="A1", recipient_name="X", recipient_type="loan_fund",
+        program="CDFI_FA", award_amount=1_000.0, award_date="2024-09-15",
+        award_year=2024, state="IL", congressional_district=1,
+        intended_use="u", status="active",
+    )
+    d.update(kw)
+    return lambda: Award(**d)
+
+
+def _recipient(**kw):
+    """An otherwise-valid Recipient, with overrides."""
+    from cdfifund import Recipient
+
+    d = dict(
+        recipient_id="R1", name="X", type="loan_fund",
+        certification_status="certified", total_awards=1.0,
+        programs_received=["CDFI_FA"], geographic_areas=["IL"],
+    )
+    d.update(kw)
+    return lambda: Recipient(**d)
+
+
+def _record(**kw):
+    """An otherwise-valid ComplianceRecord, with overrides."""
+    from cdfifund import ComplianceRecord
+
+    d = dict(
+        recipient_id="R1", program="CDFI_FA", deployment_pct=0.5,
+        deadline="2026-12-01", status="on_track",
+        last_reporting_date="2025-01-01",
+    )
+    d.update(kw)
+    return lambda: ComplianceRecord(**d)
+
+
 README = _find_readme()
 
 readme_required = pytest.mark.skipif(
@@ -150,6 +190,78 @@ class TestReadmeClaims:
             for code in table:
                 assert f"`{code}`" in text, f"vocabulary code {code!r} undocumented in README"
 
+    def test_documented_vocabularies_actually_validate(self):
+        """The README says these raise. Prove it by making them raise.
+
+        This test replaces one that only checked whether the code strings
+        appeared in the markdown. That version passed for the entire 0.2.0
+        build while `Recipient.type` -- named explicitly in the README's own
+        RECIPIENT_TYPES heading -- validated nothing at all. A documentation
+        test that never executes the documented behaviour tests the
+        documentation's spelling, not its truth.
+
+        Every entry below is a claim the README makes on the page. Each one is
+        checked twice: an invalid value must raise, and every valid code must
+        be accepted (so the guard cannot be satisfied by rejecting everything).
+        """
+        from cdfifund import CDFI_PROGRAMS, COMPLIANCE_STATUS_CODES, RECIPIENT_TYPES
+
+        # (vocabulary, factory, field) for every field the README says the
+        # vocabulary governs.
+        claims = [
+            (RECIPIENT_TYPES, _award, "recipient_type"),
+            (RECIPIENT_TYPES, _recipient, "type"),
+            (CDFI_PROGRAMS, _award, "program"),
+            (CDFI_PROGRAMS, _record, "program"),
+            (COMPLIANCE_STATUS_CODES, _record, "status"),
+        ]
+
+        for vocabulary, factory, field in claims:
+            with pytest.raises(ValueError) as exc:
+                factory(**{field: "DEFINITELY_NOT_A_VALID_CODE"})()
+            assert field in str(exc.value), (
+                f"{field}: error message does not name the field"
+            )
+            for code in vocabulary:
+                factory(**{field: code})()
+
+    def test_programs_received_validates_every_element(self):
+        """RECIPIENT_TYPES/CDFI_PROGRAMS are list-valued in one place."""
+        from cdfifund import CDFI_PROGRAMS
+
+        _recipient(programs_received=list(CDFI_PROGRAMS))()
+        with pytest.raises(ValueError, match="programs_received"):
+            _recipient(programs_received=["CDFI_FA", "NOT_A_PROGRAM"])()
+
+    def test_readme_constraints_table_names_every_dataclass_field(self):
+        """B3: the constraints table read as an exhaustive carve-out while
+        omitting Award.state, award_date and award_year. If a field exists, the
+        table must say something about it -- including "not validated"."""
+        import dataclasses
+
+        from cdfifund import Award, ComplianceRecord, Recipient
+
+        text = README.read_text()
+        missing = []
+        for cls in (Award, Recipient, ComplianceRecord):
+            for f in dataclasses.fields(cls):
+                if f"`{cls.__name__}.{f.name}`" not in text:
+                    missing.append(f"{cls.__name__}.{f.name}")
+        assert not missing, (
+            "README constraints table omits these fields: " + ", ".join(missing)
+        )
+
+    def test_readme_does_not_claim_malformed_deadlines_are_dropped(self):
+        """0.2.0 validates dates at construction, so the silent-drop failure
+        mode the build session documented can no longer occur. A caveat that
+        describes impossible behaviour is as wrong as a missing one."""
+        text = README.read_text().lower()
+        assert "malformed deadlines are silently dropped" not in text
+        assert "vanishes from every compliance report" not in text
+
+    def test_readme_documents_construction_time_date_validation(self):
+        assert "YYYY-MM-DD" in README.read_text()
+
     def test_documents_recipient(self):
         """Recipient is in __all__ and was absent from the 0.1.0 README."""
         assert "Recipient(" in README.read_text()
@@ -162,6 +274,12 @@ class TestReadmeClaims:
     def test_discloses_date_today_relativity(self):
         assert "date.today()" in README.read_text()
 
-    def test_discloses_silently_dropped_malformed_deadlines(self):
-        text = README.read_text().lower()
-        assert "malformed" in text and "silently" in text
+    def test_discloses_the_deferred_limitations(self):
+        """Known-but-unfixed behaviour must be disclosed, not left latent."""
+        text = README.read_text()
+        assert "recipient_name" in text and "recipient_id" in text, (
+            "README must disclose that aggregation keys on recipient_name"
+        )
+        assert "first_time_recipients" in text, (
+            "README must disclose what first_time_recipients actually counts"
+        )

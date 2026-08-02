@@ -191,9 +191,18 @@ class TestAtRiskSemanticReconciliation:
     def test_well_deployed_record_inside_window_is_not_at_risk(self):
         assert self._record(30, pct=0.80).is_at_risk is False
 
-    def test_malformed_deadline_is_neither_at_risk_nor_overdue(self):
+    def test_malformed_deadline_is_rejected_at_construction(self):
+        """0.2.0 replaced silent-skip with a construction-time raise.
+
+        Through the fix release this record was constructible and then vanished
+        from every compliance report: is_at_risk and is_overdue both returned
+        False, check_deadlines() omitted it from both lists, and
+        at_risk_recipients() dropped it -- while summary()'s total_records
+        still counted it, producing a short numerator over a full denominator.
+        """
         from cdfifund.data.schema import ComplianceRecord
 
-        r = ComplianceRecord("R-BAD", "CDFI_FA", 0.10, "not-a-date", "at_risk", "2025-01-01")
-        assert r.is_at_risk is False
-        assert r.is_overdue is False
+        with pytest.raises(ValueError, match="deadline must be YYYY-MM-DD"):
+            ComplianceRecord(
+                "R-BAD", "CDFI_FA", 0.10, "not-a-date", "at_risk", "2025-01-01"
+            )

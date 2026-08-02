@@ -3,7 +3,12 @@
 from datetime import date
 from typing import List, Dict, Any, Optional
 
-from cdfifund.data.schema import Award, ComplianceRecord, COMPLIANCE_STATUS_CODES
+from cdfifund.data.schema import (
+    Award,
+    ComplianceRecord,
+    COMPLIANCE_STATUS_CODES,
+    parse_iso_date,
+)
 
 
 class ComplianceTracker:
@@ -111,9 +116,11 @@ def check_deadlines(
     """Identify records with deadlines falling within a forward-looking window.
 
     Evaluated against ``date.today()``, so results change over time for an
-    unchanged input. Records with a malformed ``deadline`` (not ISO
-    ``YYYY-MM-DD``) are silently skipped and appear in neither the
-    ``upcoming_deadlines`` nor the ``overdue`` list.
+    unchanged input.
+
+    Every record is accounted for: a record appears in ``upcoming_deadlines``,
+    in ``overdue``, or in neither because it is fully deployed or its deadline
+    is beyond the horizon. No record is dropped for being unparseable.
 
     Args:
         records: List of ComplianceRecord objects.
@@ -121,33 +128,41 @@ def check_deadlines(
 
     Returns:
         Dict with upcoming_deadlines list and counts.
+
+    Raises:
+        ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
+            string. Unreachable for records constructed normally, since
+            :class:`~cdfifund.data.schema.ComplianceRecord` validates it.
+
+    .. versionchanged:: 0.2.0
+        Records with a malformed ``deadline`` used to be silently skipped,
+        appearing in neither list while still counting toward the denominator
+        elsewhere. Deadlines are now validated at construction, and this
+        function raises rather than dropping.
     """
     today = date.today()
     upcoming = []
     overdue = []
 
     for r in records:
-        try:
-            dl = date.fromisoformat(r.deadline)
-            days_remaining = (dl - today).days
-            if days_remaining < 0 and r.deployment_pct < 1.0:
-                overdue.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deadline": r.deadline,
-                    "deployment_pct": r.deployment_pct,
-                    "days_overdue": abs(days_remaining),
-                })
-            elif 0 <= days_remaining <= horizon_days and r.deployment_pct < 1.0:
-                upcoming.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deadline": r.deadline,
-                    "deployment_pct": r.deployment_pct,
-                    "days_remaining": days_remaining,
-                })
-        except ValueError:
-            continue
+        dl = parse_iso_date(r.deadline, "deadline")
+        days_remaining = (dl - today).days
+        if days_remaining < 0 and r.deployment_pct < 1.0:
+            overdue.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deadline": r.deadline,
+                "deployment_pct": r.deployment_pct,
+                "days_overdue": abs(days_remaining),
+            })
+        elif 0 <= days_remaining <= horizon_days and r.deployment_pct < 1.0:
+            upcoming.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deadline": r.deadline,
+                "deployment_pct": r.deployment_pct,
+                "days_remaining": days_remaining,
+            })
 
     return {
         "upcoming_deadlines": sorted(upcoming, key=lambda x: x["days_remaining"]),
@@ -173,8 +188,7 @@ def at_risk_recipients(
     :attr:`ComplianceRecord.is_at_risk` as of 0.2.0.
 
     Evaluated against ``date.today()``, so results change over time for an
-    unchanged input. Records with a malformed ``deadline`` (not ISO
-    ``YYYY-MM-DD``) are silently skipped and appear in no bucket.
+    unchanged input. No record is dropped for being unparseable.
 
     Args:
         records: List of ComplianceRecord objects.
@@ -184,24 +198,28 @@ def at_risk_recipients(
     Returns:
         List of dicts with recipient_id, program, deployment_pct, deadline,
         and days_remaining, sorted by days_remaining ascending.
+
+    Raises:
+        ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
+            string. See :func:`check_deadlines`.
+
+    .. versionchanged:: 0.2.0
+        Records with a malformed ``deadline`` used to be silently skipped.
     """
     today = date.today()
     results = []
 
     for r in records:
-        try:
-            dl = date.fromisoformat(r.deadline)
-            days_remaining = (dl - today).days
-            if r.deployment_pct < threshold_pct and 0 <= days_remaining <= days_window:
-                results.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deployment_pct": r.deployment_pct,
-                    "deadline": r.deadline,
-                    "days_remaining": days_remaining,
-                    "shortfall_pct": threshold_pct - r.deployment_pct,
-                })
-        except ValueError:
-            continue
+        dl = parse_iso_date(r.deadline, "deadline")
+        days_remaining = (dl - today).days
+        if r.deployment_pct < threshold_pct and 0 <= days_remaining <= days_window:
+            results.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deployment_pct": r.deployment_pct,
+                "deadline": r.deadline,
+                "days_remaining": days_remaining,
+                "shortfall_pct": threshold_pct - r.deployment_pct,
+            })
 
     return sorted(results, key=lambda x: x["days_remaining"])

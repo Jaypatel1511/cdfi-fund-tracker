@@ -65,16 +65,83 @@ not have a success-shaped return.**
   **Migration:** to recover the old, broader set, use
   `r.is_at_risk or r.is_overdue`.
 
+- **Constructor validation is now exhaustive.** Every field of every dataclass
+  is either validated or documented as unvalidated in the README's constraints
+  table; there is no third category. Newly enforced, all raising `ValueError`:
+
+  | Field | Rule | Previously |
+  |---|---|---|
+  | `Recipient.type` | must be in `RECIPIENT_TYPES` | accepted anything, incl. `None`, `42`, `''` |
+  | `Recipient.programs_received` | every element in `CDFI_PROGRAMS` | accepted anything |
+  | `ComplianceRecord.program` | must be in `CDFI_PROGRAMS` | accepted anything |
+  | `Award.state` | must be in `US_STATES_AND_TERRITORIES` | accepted `il`, `Illinois`, `" IL"`, `ZZ` |
+  | `Award.award_date` | strict `YYYY-MM-DD`, real calendar date | accepted anything |
+  | `ComplianceRecord.deadline` | strict `YYYY-MM-DD`, real calendar date | accepted anything |
+  | `ComplianceRecord.last_reporting_date` | strict `YYYY-MM-DD`, real calendar date | accepted anything |
+  | `Award.award_year` | `int >= 1994` | accepted `1776`, `"2024"`, `None` |
+  | `Award.award_amount` | must be **finite** | `nan` passed, because `nan <= 0` is False |
+  | `Recipient.total_awards` | must be **finite** | `nan` passed, because `nan < 0` is False |
+
+  **Migration:** records your code builds today may now raise. Every message
+  names the field, the rule, and the offending value. If a date raises, it was
+  never being counted correctly — see the `deadline` note below.
+
+- **Malformed `deadline` values are rejected at construction instead of being
+  silently dropped from every compliance report.** Previously a record with
+  `deadline="09/15/2024"` was constructible and then vanished: `is_at_risk` and
+  `is_overdue` returned `False`, `check_deadlines()` omitted it from both
+  `upcoming_deadlines` and `overdue`, and `at_risk_recipients()` dropped it —
+  while `summary()`'s `total_records` still counted it. Six records in, three
+  malformed, and `summary()` reported an at-risk rate of 1/6 = 16.7% where the
+  truth was 2/6 = 33.3%. A short numerator over a full denominator, with no
+  error and no count of what was dropped.
+
+  The four `except ValueError` handlers that implemented the skip were
+  **removed rather than kept as defensive depth.** They were not dead code:
+  these dataclasses are mutable, so `record.deadline = "garbage"` after
+  construction still reaches them. The question was what they should *do* when
+  reached, and silently reporting a record as "not at risk" because its date
+  could not be read is the under-counting this release exists to remove. They
+  now raise.
+
+- **The date guard is version-stable.** `date.fromisoformat` accepts only
+  `YYYY-MM-DD` on Python 3.9/3.10 but also accepts `20240915` and ISO week
+  dates like `2024-W37-1` on 3.11+. With a 3.9–3.12 support matrix that would
+  make the same record valid on one interpreter and invalid on another. The new
+  `parse_iso_date()` helper matches `^\d{4}-\d{2}-\d{2}$` and then constructs a
+  `date`, so `2024-02-29` is accepted and `2024-02-30` is rejected identically
+  on every supported version. It is used at construction *and* at every parsing
+  site, so validation and parsing cannot diverge.
+
+  Non-string input (`None`, a real `datetime.date`) now raises `ValueError` at
+  construction rather than a bare `TypeError` from inside a property.
+
 ### Added
 
+- **`US_STATES_AND_TERRITORIES`** — the 50 states, DC, and 5 territories (56
+  codes), exported from the package root and published in the README.
+- **`parse_iso_date()`** — the package's single date gate, exported so callers
+  can validate with exactly the same rule before constructing records.
+- **`MANIFEST.in`** — the 0.2.0 sdist shipped `tests/test_*.py` without
+  `conftest.py` (setuptools' legacy default matches only `tests/test*.py`), so
+  `pip install <sdist> && pytest` gave 72 passed / 85 errors: every
+  fixture-dependent test failing at setup. `CHANGELOG.md` was absent too, which
+  made the README's relative link 404 on the PyPI project page. Third instance
+  of this defect in the portfolio after sbic-tracker and oz-tracker.
+- **`release.yml` job `test-sdist`** — unpacks the built sdist, installs it, and
+  runs **its own** shipped suite from a directory that contains neither the
+  checkout nor `./cdfifund`. The existing `test-wheel` job copies `tests/` from
+  the git checkout, so it structurally cannot detect a broken sdist; `twine
+  check --strict` passed on the broken artifact. A gate must consume the
+  artifact it certifies. Verified to fail when `recursive-include` is removed.
 - **`cdfifund/exceptions.py`** — `CDFIFundTrackerError` (base) and
   `CDFIFundDownloadError` (subclass). Both exported from the package root and
   listed in `__all__`. The package previously had no exception module.
 - **`.github/workflows/ci.yml`** — install and test on Python 3.9–3.12 for
   every push and PR to `main`. Never publishes, never requests `id-token`.
-- **`.github/workflows/release.yml`** — tag-triggered five-job release
-  pipeline: `verify-version` → `build` → `test-wheel` → `twine-check` →
-  `publish`. All actions SHA-pinned; publishing via PyPI Trusted Publisher
+- **`.github/workflows/release.yml`** — tag-triggered six-job release
+  pipeline: `verify-version` → `build` → (`test-wheel`, `test-sdist`) →
+  `twine-check` → `publish`. All actions SHA-pinned; publishing via PyPI Trusted Publisher
   (OIDC, environment `pypi`), no API token.
 
   The version guard checks the git tag against all three version sources
@@ -92,7 +159,25 @@ not have a success-shaped return.**
   is under test.
 - **`tests/test_readme.py`** — executes the README quickstart end to end,
   verifies every imported name is used, and checks the README's factual claims
-  (test count, vocabulary coverage, disclosures) against the package.
+  against the package: the stated test count, that the constraints table names
+  **every** field of every dataclass, and — for each documented vocabulary —
+  that an invalid value actually raises while every valid code is accepted.
+  The last of these replaces a test that only checked whether the codes
+  appeared in the markdown, which is why `Recipient.type` shipped documented as
+  validated while validating nothing.
+
+- **All four GitHub-owned actions moved off the deprecated `node20` runtime.**
+  `actions/checkout` v4.3.1 → v7.0.1, `actions/setup-python` v5.6.0 → v7.0.0,
+  `actions/upload-artifact` v4.6.2 → v7.0.1, `actions/download-artifact` v4.3.0
+  → v8.0.1 — all now `node24`, each re-pinned to a commit SHA resolved against
+  the GitHub API. `pypa/gh-action-pypi-publish` is a composite action, is
+  unaffected, and keeps its existing pin, which is correctly the *dereferenced*
+  commit of annotated tag v1.14.0 rather than the tag object.
+
+  The matrix jobs now pin `runs-on: ubuntu-24.04` instead of `ubuntu-latest`.
+  `actions/python-versions` ships no Python 3.9 build for ubuntu-26.04, and 3.9
+  is this package's declared floor, so `ubuntu-latest` would break the release
+  gate whenever the runner image rolls forward.
 - **`CHANGELOG.md`** — this file.
 
 ### Fixed
@@ -109,20 +194,49 @@ not have a success-shaped return.**
 - **`Recipient` is now documented.** It was in `__all__` and absent from the
   README.
 - **Validated vocabularies are now published.** `CDFI_PROGRAMS` (8),
-  `RECIPIENT_TYPES` (5), `COMPLIANCE_STATUS_CODES` (6), the `Award.status` set,
-  the `Recipient.certification_status` set, and the `deployment_pct` 0.0–1.0
-  range all raise `ValueError` on violation and none appeared in the README.
-  Users learned them by crashing.
+  `RECIPIENT_TYPES` (5), `COMPLIANCE_STATUS_CODES` (6),
+  `US_STATES_AND_TERRITORIES` (56), the `Award.status` set, the
+  `Recipient.certification_status` set, and the `deployment_pct` 0.0–1.0 range
+  all raise `ValueError` on violation and none appeared in the README. Users
+  learned them by crashing.
+
+  **Correction.** An earlier draft of this entry claimed all five
+  `RECIPIENT_TYPES` raised `ValueError` on violation. For `Recipient.type` that
+  was false when written: the field was documented as validated here and in the
+  README and validated nothing. It is validated now. The test that was supposed
+  to catch this only checked whether the codes appeared in the README's
+  markdown; it has been rewritten to construct an invalid value and require a
+  raise for every documented vocabulary, and verified to fail when the
+  validation is reverted.
 - **`program_effectiveness_metrics()` now carries a caveat.** Its own docstring
   says it measures award patterns, not outcomes; the README targeted "policy
   analysts" with no such warning. It has no access to jobs created, units
   financed, or any impact data, and supports no claim that one program works
   better than another.
-- **Date-relativity and silent data loss are now disclosed.** All compliance
-  results are relative to `date.today()` and change day to day for unchanged
-  inputs. Records with a malformed (non-ISO) `deadline` are silently skipped by
-  `is_at_risk`, `is_overdue`, `check_deadlines()`, and `at_risk_recipients()` —
-  they appear in no bucket and no count, with no error.
+- **Date-relativity is now disclosed.** All compliance results are relative to
+  `date.today()` and change day to day for unchanged inputs.
+
+  The silent-data-loss disclosure that accompanied this entry described records
+  with a malformed `deadline` being skipped by `is_at_risk`, `is_overdue`,
+  `check_deadlines()` and `at_risk_recipients()`. That behaviour no longer
+  exists — such records are now rejected at construction — so the README
+  subsection describing it has been rewritten rather than left documenting an
+  impossible failure mode.
+
+- **Known limitations are now disclosed rather than latent.** The README has a
+  Limitations section covering recipient-level aggregation keying on
+  `recipient_name` rather than `recipient_id` (two institutions sharing a name
+  merge silently), `first_time_recipients` counting single-award recipients *in
+  the supplied dataset* rather than first-time-ever, and validation errors being
+  `ValueError` rather than `CDFIFundTrackerError`. All three are deferred to
+  0.3.0 as design changes, not patches.
+
+- **`exceptions.py` no longer claims a family it does not have.** Its docstring
+  said "all exceptions raised deliberately by this package derive from
+  `CDFIFundTrackerError`". The schema layer raises bare `ValueError`, which does
+  not, so a single `except CDFIFundTrackerError` never caught validation
+  failures. The docstring now states the actual scope and points at the deferred
+  migration.
 
 ### Removed
 

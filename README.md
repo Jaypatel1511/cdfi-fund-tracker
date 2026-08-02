@@ -43,6 +43,8 @@ from cdfifund import (
     CDFI_PROGRAMS,
     RECIPIENT_TYPES,
     COMPLIANCE_STATUS_CODES,
+    US_STATES_AND_TERRITORIES,
+    parse_iso_date,
     CDFIFundDownloadError,
     load_sample_awards,
     load_from_cdfi_fund_url,
@@ -89,6 +91,29 @@ my_award = Award(
     intended_use="Small business lending",
     status="active",                   # 'active' | 'closed' | 'pending'
 )
+
+# Everything the constraints table claims is enforced, is enforced. Each of
+# these raises ValueError naming the field, the rule, and the value you passed:
+for bad_kwargs in (
+    {"recipient_type": "Loan Fund"},   # display label, not the code
+    {"program": "NOT_A_PROGRAM"},      # not in CDFI_PROGRAMS
+    {"state": "Illinois"},             # not in US_STATES_AND_TERRITORIES
+    {"state": "il"},                   # right place, wrong case
+    {"award_date": "09/15/2024"},      # not YYYY-MM-DD
+    {"award_date": "2024-02-30"},      # well-formed but not a real date
+    {"award_amount": float("nan")},    # nan <= 0 is False; the guard used to miss it
+    {"award_year": 1776},              # before the CDFI Fund existed
+):
+    fields = {**my_award.__dict__, **bad_kwargs}
+    try:
+        Award(**fields)
+        raise AssertionError(f"expected ValueError for {bad_kwargs}")
+    except ValueError as exc:
+        print(f"rejected {bad_kwargs}: {exc}"[:96])
+
+print(f"{len(US_STATES_AND_TERRITORIES)} valid state/territory codes; "
+      f"IL is {US_STATES_AND_TERRITORIES['IL']}")
+print(f"parse_iso_date is the single date gate: {parse_iso_date('2024-09-15', 'award_date')}")
 
 # For the rest of this quickstart we use the SYNTHETIC sample set, so the
 # numbers below are illustrative and mean nothing about real CDFI Fund awards.
@@ -191,9 +216,11 @@ print(f"Programs: {', '.join(CDFI_PROGRAMS)}")
 
 ## Validated vocabularies
 
-The dataclasses validate on construction and raise `ValueError` on anything outside these sets. All three tables are importable from `cdfifund`.
+The dataclasses validate on construction and raise `ValueError` on anything outside these sets. All four tables are importable from `cdfifund`.
 
-### `CDFI_PROGRAMS` — valid `Award.program`
+Every claim in this section is executed by the test suite: for each vocabulary, an invalid value must raise **and** every valid code must be accepted. Through 0.2.0's build that test only checked whether the codes appeared in this markdown — which is how `Recipient.type`, named in the heading two subsections down, shipped documented-as-validated and validating nothing.
+
+### `CDFI_PROGRAMS` — valid `Award.program`, `ComplianceRecord.program`, and every element of `Recipient.programs_received`
 
 | Code | Program |
 |---|---|
@@ -207,6 +234,8 @@ The dataclasses validate on construction and raise `ValueError` on anything outs
 | `CMF` | Capital Magnet Fund |
 
 ### `RECIPIENT_TYPES` — valid `Award.recipient_type` and `Recipient.type`
+
+Pass the **code**, not the display label: `type="loan_fund"`, not `type="Loan Fund"`.
 
 | Code | Type |
 |---|---|
@@ -227,18 +256,72 @@ The dataclasses validate on construction and raise `ValueError` on anything outs
 | `extended` | Extended — deadline extended by CDFI Fund |
 | `pending_review` | Pending review — awaiting CDFI Fund determination |
 
-### Other constructor constraints
+### `US_STATES_AND_TERRITORIES` — valid `Award.state`
+
+The 50 states, `DC`, and five territories: `AS`, `GU`, `MP`, `PR`, `VI`. Uppercase USPS codes, matched exactly — 56 in all, importable from `cdfifund`.
+
+`il`, `Illinois`, `" IL"` and `ZZ` all raise. They are the same place under four spellings, and accepting them made `geographic_distribution()` report one state as four. Military codes (`AA`/`AE`/`AP`) and the Freely Associated States (`FM`/`MH`/`PW`) are excluded — they are not CDFI Fund award jurisdictions.
+
+### Every constructor constraint
+
+Exhaustive: every field of every dataclass, validated or not. Anything marked *not validated* is accepted as-is and never checked, so check it yourself before you rely on it.
+
+**`Award`**
 
 | Field | Rule |
 |---|---|
+| `Award.award_id` | **not validated** — an opaque caller-side key; uniqueness is not enforced |
+| `Award.recipient_name` | **not validated** — free text, and the key aggregation groups on (see Limitations) |
+| `Award.recipient_type` | must be in `RECIPIENT_TYPES` |
+| `Award.program` | must be in `CDFI_PROGRAMS` |
+| `Award.award_amount` | must be a **finite** number `> 0`. `nan` and `inf` raise; so does a string or a bool |
+| `Award.award_date` | must be `YYYY-MM-DD` and a real calendar date |
+| `Award.award_year` | must be an `int >= 1994`. **Not** cross-checked against `award_date` — see below |
+| `Award.state` | must be in `US_STATES_AND_TERRITORIES` |
+| `Award.congressional_district` | **not validated** — `int` or `None`; numbering is state-dependent and changes with redistricting, and nothing here consumes it |
+| `Award.intended_use` | **not validated** — free text by design |
 | `Award.status` | must be `active`, `closed`, or `pending` (default `active`) |
-| `Award.award_amount` | must be `> 0` |
-| `ComplianceRecord.deployment_pct` | must be `0.0 <= pct <= 1.0` — a **fraction**, not a percent. `50` raises; use `0.50` |
-| `ComplianceRecord.status` | must be in `COMPLIANCE_STATUS_CODES` |
-| `Recipient.certification_status` | must be `certified`, `applicant`, or `formerly_certified` |
-| `Recipient.total_awards` | must be `>= 0` |
 
-`ComplianceRecord.deadline` and `last_reporting_date` are **not** validated at construction. A malformed date is accepted and only surfaces later — see below.
+**`Recipient`**
+
+| Field | Rule |
+|---|---|
+| `Recipient.recipient_id` | **not validated** — an opaque caller-side key. Nothing in this package consumes it (see Limitations) |
+| `Recipient.name` | **not validated** — free text |
+| `Recipient.type` | must be in `RECIPIENT_TYPES` |
+| `Recipient.certification_status` | must be `certified`, `applicant`, or `formerly_certified` |
+| `Recipient.total_awards` | must be a **finite** number `>= 0`. `nan` and `inf` raise |
+| `Recipient.programs_received` | every element must be in `CDFI_PROGRAMS`. An empty list is allowed |
+| `Recipient.geographic_areas` | **not validated** — documented as states *or regions*, so it is not a state-code vocabulary |
+
+**`ComplianceRecord`**
+
+| Field | Rule |
+|---|---|
+| `ComplianceRecord.recipient_id` | **not validated** — an opaque caller-side key; this package never resolves it against a `Recipient` |
+| `ComplianceRecord.program` | must be in `CDFI_PROGRAMS` |
+| `ComplianceRecord.deployment_pct` | must be a **finite** number `0.0 <= pct <= 1.0` — a **fraction**, not a percent. `50` raises; use `0.50` |
+| `ComplianceRecord.deadline` | must be `YYYY-MM-DD` and a real calendar date |
+| `ComplianceRecord.status` | must be in `COMPLIANCE_STATUS_CODES` |
+| `ComplianceRecord.last_reporting_date` | must be `YYYY-MM-DD` and a real calendar date |
+
+#### Dates: what "valid" means, and why not `date.fromisoformat`
+
+All three date fields are checked at construction against a strict `YYYY-MM-DD` pattern, then confirmed to be a real calendar date. `2024-02-29` is accepted; `2024-02-30` raises. `09/01/2026`, `2024-9-5`, `""`, `None`, and a real `datetime.date` object all raise `ValueError` naming the field, the expected format, and the value you passed:
+
+```
+ValueError: deadline must be YYYY-MM-DD, got '09/01/2026'
+```
+
+The check is **not** `date.fromisoformat`, deliberately. On Python 3.9/3.10 that function accepts only `YYYY-MM-DD`; on 3.11+ it also accepts the compact form `20240915` and ISO week dates like `2024-W37-1`. This package supports 3.9 through 3.12, so using it would make the same record valid on one interpreter and invalid on another. A guard whose verdict depends on the interpreter is unreproducible, which is worse than no guard.
+
+Passing a non-string raises `ValueError`, not `TypeError`. A null CSV field and a real `date` object are both natural mistakes, and through 0.2.0's build they surfaced as a bare `TypeError` from inside a property — well away from the line that caused it.
+
+#### `award_year` is not derived from `award_date`
+
+They are independent, on purpose. `award_year` is the **fiscal** year, and the federal fiscal year runs October–September, so an award announced `2023-11-15` legitimately belongs to FY2024. A calendar-year equality check would reject correct data.
+
+The consequence, stated plainly: `Award(award_date="2024-09-15", award_year=2024)` and `Award(award_date="2023-11-15", award_year=2024)` are both valid, and nothing detects a genuine mismatch between the two fields. `award_year >= 1994` (the CDFI Fund's founding year) is the only bound; there is no upper bound, because a ceiling tied to the current date would make construction date-relative — the exact hazard this package warns about for compliance results. `by_year()` reports whatever `award_year` you supply.
 
 ## Compliance semantics and caveats
 
@@ -246,15 +329,19 @@ The dataclasses validate on construction and raise `ValueError` on anything outs
 
 `is_at_risk`, `is_overdue`, `ComplianceTracker.at_risk()`, `.overdue()`, `.summary()`, `check_deadlines()`, and `at_risk_recipients()` all evaluate against the current date. **The same unchanged records return different results on different days.** Nothing is cached, and there is no way to pin an as-of date. If you need a reproducible report, record the run date alongside the output.
 
-### Malformed deadlines are silently dropped
+### Malformed deadlines now fail at construction (changed in 0.2.0)
 
-`ComplianceRecord` accepts any string as `deadline`. Downstream, every consumer catches the resulting `ValueError` and skips the record:
+`ComplianceRecord` used to accept any string as `deadline`, and every downstream consumer caught the resulting `ValueError` and skipped the record: `is_at_risk` and `is_overdue` returned `False`, `check_deadlines()` omitted it from **both** `upcoming_deadlines` and `overdue`, and `at_risk_recipients()` dropped it entirely — while `summary()`'s `total_records` still counted it.
 
-- `is_at_risk` and `is_overdue` return `False`
-- `check_deadlines()` omits it from **both** `upcoming_deadlines` and `overdue`
-- `at_risk_recipients()` omits it entirely
+That produced a short numerator over a full denominator. Six records in, three with deadlines like `"09/15/2024"`, and `summary()` reported `total_records=6, at_risk_count=1, overdue_count=1` — an at-risk rate of 1/6 = 16.7% where the truth was 2/6 = 33.3%. No error, no warning, no count of what was dropped. `track_deployment()` is deadline-independent, so two views of the same portfolio disagreed and neither said why.
 
-A record with `deadline="09/15/2024"` (not ISO `YYYY-MM-DD`) vanishes from every compliance report with no error and no count. **Validate your dates before constructing records.** Counts in `summary()` will silently under-report.
+**0.2.0 validates all three date fields at construction.** A malformed date can no longer enter a `ComplianceRecord`, so no report can silently drop one. Every record you successfully construct is accounted for in every compliance function.
+
+The `except ValueError` handlers that implemented the silent skip were **removed, not kept as defensive depth.** Reasoning: dataclasses here are mutable, so assigning `record.deadline = "garbage"` after construction still reaches those code paths — they were never truly unreachable. The question was therefore not "is this dead code?" but "what should happen when it runs?", and silently reporting a record as *not at risk* because its date could not be read is the exact under-counting this release exists to remove. They now raise, naming the field and the value.
+
+### `is_at_risk` and `is_overdue` can raise
+
+Both properties, and `check_deadlines()` / `at_risk_recipients()`, raise `ValueError` on an unreadable `deadline`. For a normally-constructed record this cannot happen. It is reachable only by mutating `deadline` after construction, which a mutable dataclass permits and this package does not defend against beyond failing loudly.
 
 ### "At risk" is forward-looking (changed in 0.2.0)
 
@@ -269,6 +356,28 @@ A record with `deadline="09/15/2024"` (not ISO `YYYY-MM-DD`) vanishes from every
 ### `program_effectiveness_metrics()` does not measure effectiveness
 
 It measures **award patterns** — geographic reach, average award size, recipient concentration. It has no access to outcome data: no jobs created, no units financed, no capital deployed to end borrowers, no community impact of any kind. Nothing it returns supports a claim that one program works better than another. Treat it as a descriptive profile of how a program *distributes* money, not of what that money *accomplishes*.
+
+## Limitations
+
+Known, unfixed, and disclosed rather than left latent. Each is a design change rather than a patch, and each is deferred to 0.3.0.
+
+### Aggregation keys on `recipient_name`, not `recipient_id`
+
+Every recipient-level rollup — `top_recipients()`, `award_concentration_analysis()`, `recipient_lifecycle_analysis()`, and `program_effectiveness_metrics()`'s recipient counts — groups awards by the `recipient_name` string. **Two distinct institutions that share a name merge into one row, silently.**
+
+Verified: two "Community Bank" awards, one in IL and one in CA, collapse to `unique_recipients=1` and `single_recipient_max_pct=1.0` — a perfectly concentrated portfolio that is actually two separate banks. The reverse also holds: one institution recorded under two spellings ("Hope Community Capital" and "Hope Community Capital, Inc.") counts as two recipients.
+
+`Award` has no `recipient_id` field, and `Recipient.recipient_id` exists but **nothing in this package consumes it**. Deduplicate on your side before you rely on any concentration metric.
+
+### `first_time_recipients` does not mean first-time-ever
+
+`recipient_lifecycle_analysis()['first_time_recipients']` counts recipients holding **exactly one award in the dataset you passed in**. It has no knowledge of any award outside that list. A recipient with a twenty-year award history counts as "first time" if your slice contains one of their awards. The name outruns the definition; read it as `single_award_recipients_in_this_dataset`.
+
+### Validation errors are `ValueError`, not `CDFIFundTrackerError`
+
+`CDFIFundTrackerError` is the base for the package's *operational* errors — currently only `CDFIFundDownloadError`. Constructor validation raises bare `ValueError`, which does **not** derive from it. A single `except CDFIFundTrackerError` will not catch a validation failure; catch `(CDFIFundTrackerError, ValueError)` to cover both.
+
+Migrating the schema layer to a `CDFIFundValidationError` is deferred: it is a breaking change for anyone currently catching `ValueError`, and half-migrating would leave the hierarchy harder to reason about than leaving it alone.
 
 ## Key features
 
@@ -302,8 +411,10 @@ Every one of these assumes **you have already loaded award data yourself**. This
 python -m pytest
 ```
 
-157 tests, all passing. The suite includes tests that execute this README's
-quickstart end to end and check the claims on this page — including this count.
+254 tests, all passing. The suite includes tests that execute this README's
+quickstart end to end and check the claims on this page — including this count,
+the exhaustiveness of the constraints table above, and, for every documented
+vocabulary, that an invalid value actually raises.
 
 ## Changelog
 

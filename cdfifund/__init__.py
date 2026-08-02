@@ -21,6 +21,8 @@ from cdfifund.data.schema import (
     CDFI_PROGRAMS,
     RECIPIENT_TYPES,
     COMPLIANCE_STATUS_CODES,
+    US_STATES_AND_TERRITORIES,
+    parse_iso_date,
 )
 from cdfifund.data.loader import load_sample_awards, load_from_cdfi_fund_url
 from cdfifund.programs.cdfi_program import cdfi_program_analysis, fa_vs_ta_breakdown
@@ -61,6 +63,8 @@ __all__ = [
     "CDFI_PROGRAMS",
     "RECIPIENT_TYPES",
     "COMPLIANCE_STATUS_CODES",
+    "US_STATES_AND_TERRITORIES",
+    "parse_iso_date",
     # Loader
     "load_sample_awards",
     "load_from_cdfi_fund_url",
