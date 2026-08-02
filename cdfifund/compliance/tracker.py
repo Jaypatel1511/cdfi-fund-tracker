@@ -19,11 +19,24 @@ class ComplianceTracker:
         self.records = records
 
     def at_risk(self) -> List[ComplianceRecord]:
-        """Return records that are at risk of non-compliance."""
+        """Return records at risk of non-compliance: behind pace, deadline ahead.
+
+        Delegates to :attr:`ComplianceRecord.is_at_risk` -- forward-looking,
+        below 50% deployed, deadline within the next 180 days. Disjoint from
+        :meth:`overdue`.
+
+        .. versionchanged:: 0.2.0
+            No longer includes records whose deadline has already passed;
+            those are returned by :meth:`overdue`. See
+            :attr:`ComplianceRecord.is_at_risk`.
+        """
         return [r for r in self.records if r.is_at_risk]
 
     def overdue(self) -> List[ComplianceRecord]:
-        """Return records that are past deadline with incomplete deployment."""
+        """Return records past deadline with incomplete deployment.
+
+        Disjoint from :meth:`at_risk`.
+        """
         return [r for r in self.records if r.is_overdue]
 
     def on_track(self) -> List[ComplianceRecord]:
@@ -31,7 +44,12 @@ class ComplianceTracker:
         return [r for r in self.records if r.status in ("on_track", "completed")]
 
     def summary(self) -> Dict[str, Any]:
-        """Return a portfolio-level compliance summary."""
+        """Return a portfolio-level compliance summary.
+
+        ``at_risk_count`` and ``overdue_count`` are disjoint as of 0.2.0; in
+        0.1.0 a record with a past deadline and low deployment was counted in
+        both. Both counts are relative to ``date.today()``.
+        """
         total = len(self.records)
         at_risk = self.at_risk()
         overdue = self.overdue()
@@ -92,6 +110,11 @@ def check_deadlines(
 ) -> Dict[str, Any]:
     """Identify records with deadlines falling within a forward-looking window.
 
+    Evaluated against ``date.today()``, so results change over time for an
+    unchanged input. Records with a malformed ``deadline`` (not ISO
+    ``YYYY-MM-DD``) are silently skipped and appear in neither the
+    ``upcoming_deadlines`` nor the ``overdue`` list.
+
     Args:
         records: List of ComplianceRecord objects.
         horizon_days: Number of days ahead to check (default 180).
@@ -141,6 +164,17 @@ def at_risk_recipients(
     days_window: int = 180,
 ) -> List[Dict[str, Any]]:
     """Return recipient IDs and details for at-risk deployment records.
+
+    "At risk" is forward-looking: below ``threshold_pct`` deployed with a
+    deadline that is still ahead but no more than ``days_window`` days out.
+    Records whose deadline has already passed are NOT returned here -- they are
+    overdue, a distinct state, reported by :func:`check_deadlines` under the
+    ``overdue`` key and by :attr:`ComplianceRecord.is_overdue`. This matches
+    :attr:`ComplianceRecord.is_at_risk` as of 0.2.0.
+
+    Evaluated against ``date.today()``, so results change over time for an
+    unchanged input. Records with a malformed ``deadline`` (not ISO
+    ``YYYY-MM-DD``) are silently skipped and appear in no bucket.
 
     Args:
         records: List of ComplianceRecord objects.

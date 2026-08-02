@@ -103,18 +103,42 @@ class ComplianceRecord:
 
     @property
     def is_at_risk(self) -> bool:
-        """True if the record is below 50% deployed with deadline within 6 months."""
+        """True if below 50% deployed with a deadline still ahead, within 180 days.
+
+        "At risk" is FORWARD-LOOKING: there is still time on the clock, but the
+        record is behind pace. A deadline that has already passed is not at
+        risk of being missed -- it has been missed, and is reported by
+        :attr:`is_overdue` instead. The two properties are disjoint.
+
+        Uses the same thresholds as
+        :func:`~cdfifund.compliance.tracker.at_risk_recipients` defaults
+        (``threshold_pct=0.50``, ``days_window=180``); that function takes them
+        as arguments, this property does not.
+
+        Evaluated against ``date.today()``, so the result changes over time for
+        an unchanged record. A malformed ``deadline`` returns False.
+
+        .. versionchanged:: 0.2.0
+            In 0.1.0 this used ``days_remaining <= 180`` with no lower bound,
+            so records with already-past deadlines returned True here while
+            ``at_risk_recipients()`` excluded them. Overdue records now return
+            False. To recover the old set, use ``r.is_at_risk or r.is_overdue``.
+        """
         from datetime import date
         try:
             dl = date.fromisoformat(self.deadline)
             days_remaining = (dl - date.today()).days
-            return self.deployment_pct < 0.50 and days_remaining <= 180
+            return self.deployment_pct < 0.50 and 0 <= days_remaining <= 180
         except ValueError:
             return False
 
     @property
     def is_overdue(self) -> bool:
-        """True if the deadline has passed and deployment is incomplete."""
+        """True if the deadline has passed and deployment is incomplete.
+
+        Disjoint from :attr:`is_at_risk`. Evaluated against ``date.today()``.
+        A malformed ``deadline`` returns False.
+        """
         from datetime import date
         try:
             dl = date.fromisoformat(self.deadline)
