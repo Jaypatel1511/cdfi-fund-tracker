@@ -17,20 +17,17 @@ permissions:
 jobs:
   test:
     name: test (py${{ matrix.python-version }})
-    # Pinned, not `ubuntu-latest`. actions/python-versions ships no Python
-    # 3.9 build for ubuntu-26.04, and 3.9 is this package's declared floor
-    # (`requires-python = ">=3.9"`). `ubuntu-latest` resolves to 24.04 today,
-    # but when it rolls to 26.04 the 3.9 leg of this matrix stops resolving and
-    # the release gate breaks on a runner-image change nobody made. Verified
-    # against the manifest: 3.9.25 has 22.04 and 24.04 builds and no 26.04 one.
-    # Raise this deliberately when the support floor is raised.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Matches pyproject `requires-python = ">=3.9"`. 3.9 is the declared
-        # floor; 3.12 is the current portfolio support ceiling.
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # Matches pyproject `requires-python = ">=3.11"`. 3.11 is the declared
+        # floor; 3.14 is the newest stable CPython actions/python-versions
+        # ships (3.15 is alpha/beta only in the manifest). Every version here
+        # has both an ubuntu-24.04 and an ubuntu-26.04 build, which is why this
+        # job can run on `ubuntu-latest` — it resolves whether the label points
+        # at 24.04 (today) or 26.04 (after that image goes GA).
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

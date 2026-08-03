@@ -24,15 +24,17 @@ def parse_iso_date(value: Any, field_name: str) -> date:
     calls it again rather than parsing independently. Validation and parsing
     therefore cannot drift apart.
 
-    **Deliberately not ``date.fromisoformat``.** On Python 3.9/3.10 that
-    function accepts only ``YYYY-MM-DD``; on 3.11+ it also accepts the compact
-    form ``YYYYMMDD`` and ISO week dates such as ``2024-W37-1``. This package
-    supports 3.9 through 3.12, so ``fromisoformat`` would accept on 3.12 what it
-    rejects on 3.9 -- the same record valid on one interpreter and invalid on
-    another. A guard whose verdict depends on the interpreter is worse than no
-    guard, because it is unreproducible. The regex below is version-stable, and
-    the ``date()`` construction that follows rejects impossible calendar dates
-    (``2024-02-30``) while accepting real ones (``2024-02-29``).
+    **Deliberately not ``date.fromisoformat``.** This is a stricter rule than
+    the stdlib's, on purpose. On every version this package supports (3.11+),
+    ``fromisoformat`` accepts the full ISO 8601 date grammar: the compact form
+    ``20240915`` and ISO week dates such as ``2024-W37-1``. The package's
+    contract is ``YYYY-MM-DD`` and nothing else, and the week-date form is the
+    reason that matters -- ``2024-W37-1`` parses without complaint to
+    ``2024-09-09``, a *different date* than any reader scanning that string
+    would expect. A date field that silently means something other than it
+    reads is worse than one that raises. The regex below admits exactly one
+    form, and the ``date()`` construction that follows rejects impossible
+    calendar dates (``2024-02-30``) while accepting real ones (``2024-02-29``).
 
     Args:
         value: The value to validate. Must be a ``str``.

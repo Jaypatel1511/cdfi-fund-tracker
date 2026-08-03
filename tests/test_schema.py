@@ -285,25 +285,44 @@ class TestB2DateValidation:
             factory(**{field: "2023-02-29"})()
 
 
-class TestB2VersionStability:
-    """The date guard must not depend on the interpreter.
+class TestB2StricterThanTheStdlib:
+    """The date guard admits YYYY-MM-DD and nothing else, on every supported
+    interpreter.
 
-    date.fromisoformat is strict YYYY-MM-DD on 3.9/3.10 but on 3.11+ also
-    accepts the compact form and ISO week dates. The CI matrix is 3.9-3.12, so
-    using it would make the same record valid on 3.12 and invalid on 3.9.
+    date.fromisoformat accepts the full ISO 8601 date grammar on 3.11+ -- the
+    compact form and ISO week dates -- and 3.11 is this package's floor, so
+    that is true on every version in the matrix. This is not a cross-version
+    guard; it is a deliberately stricter rule than the stdlib's. `2024-W37-1`
+    is the case that motivates it: fromisoformat resolves it to 2024-09-09,
+    silently meaning a different date than the string reads as.
+
+    These run on every interpreter in the matrix, which is what makes them
+    worth keeping: they demonstrate the strictness contract holds uniformly
+    rather than happening to hold on whichever version CI ran last.
     """
 
     @pytest.mark.parametrize("form", ["20240915", "2024-W37-1", "2024-W37"])
-    def test_forms_python_311_plus_would_accept_are_rejected(self, form):
+    def test_iso8601_forms_the_stdlib_accepts_are_rejected(self, form):
         from cdfifund.data.schema import parse_iso_date
         with pytest.raises(ValueError, match="must be YYYY-MM-DD"):
             parse_iso_date(form, "deadline")
 
+    def test_week_date_would_silently_mean_a_different_day(self):
+        """The concrete harm, asserted rather than described: the stdlib reads
+        '2024-W37-1' as 2024-09-09. A deadline column containing that string
+        must raise, not quietly become a date nine days off what it looks like.
+        """
+        import datetime
+        from cdfifund.data.schema import parse_iso_date
+        assert datetime.date.fromisoformat("2024-W37-1") == datetime.date(2024, 9, 9)
+        with pytest.raises(ValueError, match="must be YYYY-MM-DD"):
+            parse_iso_date("2024-W37-1", "deadline")
+
     def test_guard_does_not_delegate_to_fromisoformat(self):
         """Mutation guard: if parse_iso_date is ever reimplemented on top of
-        date.fromisoformat, the compact form starts passing on 3.11+ and this
-        test fails there while still passing on 3.9 -- which is the whole
-        problem. Asserting the rejection directly keeps that from landing."""
+        date.fromisoformat, the compact and week forms start passing and the
+        package's contract quietly widens to the stdlib's. Asserting the
+        rejection directly keeps that from landing unnoticed."""
         import datetime
         from cdfifund.data.schema import parse_iso_date
         assert parse_iso_date("2024-09-15", "d") == datetime.date(2024, 9, 15)

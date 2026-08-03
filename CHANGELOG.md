@@ -24,6 +24,28 @@ not have a success-shaped return.**
 
 ### Changed — BREAKING
 
+- **The supported Python floor is now 3.11.** `requires-python` moves from
+  `">=3.9"` to `">=3.11"` in `pyproject.toml`, with `python_requires` and the
+  classifiers in `setup.py` matched to it. Installing on 3.9 or 3.10 now fails
+  at resolution with a clear pip message rather than installing and running.
+
+  Two reasons, in order of weight. Python 3.9 reached end-of-life on
+  2025-10-31, and 3.10 reaches it in October 2026 — roughly two months from
+  this release — so a 3.10 floor would buy almost nothing and need raising
+  again immediately. More substantively, `date.fromisoformat` became permissive
+  in **3.11**, not 3.10: on 3.9/3.10 it accepts only `YYYY-MM-DD`, on 3.11+ the
+  full ISO 8601 date grammar. A 3.10 floor would have preserved exactly the
+  strict-vs-loose split across supported interpreters that `parse_iso_date()`
+  exists to neutralise. At a 3.11 floor every supported interpreter behaves
+  identically, and the helper's justification changes from "neutralise a
+  cross-version divergence" to "be deliberately stricter than the stdlib" —
+  see the date-guard entry below, which was rewritten accordingly.
+
+  The CI and release matrices move from `["3.9", "3.10", "3.11", "3.12"]` to
+  `["3.11", "3.12", "3.13", "3.14"]`. 3.14 is the newest **stable** CPython
+  `actions/python-versions` ships; 3.15 appears in its manifest only as
+  alpha/beta.
+
 - **`load_from_cdfi_fund_url()` now always raises `CDFIFundDownloadError`.**
   It previously returned a `List[Award]`. It now raises for every input,
   including `url=None`, including a reachable URL that returns HTTP 200.
@@ -104,14 +126,17 @@ not have a success-shaped return.**
   could not be read is the under-counting this release exists to remove. They
   now raise.
 
-- **The date guard is version-stable.** `date.fromisoformat` accepts only
-  `YYYY-MM-DD` on Python 3.9/3.10 but also accepts `20240915` and ISO week
-  dates like `2024-W37-1` on 3.11+. With a 3.9–3.12 support matrix that would
-  make the same record valid on one interpreter and invalid on another. The new
-  `parse_iso_date()` helper matches `^\d{4}-\d{2}-\d{2}$` and then constructs a
-  `date`, so `2024-02-29` is accepted and `2024-02-30` is rejected identically
-  on every supported version. It is used at construction *and* at every parsing
-  site, so validation and parsing cannot diverge.
+- **The date guard is deliberately stricter than the stdlib.**
+  `date.fromisoformat` accepts the full ISO 8601 date grammar on Python 3.11+
+  — the compact form `20240915` and ISO week dates like `2024-W37-1` — and
+  3.11 is this package's floor, so that is true on every supported version.
+  This package's contract is `YYYY-MM-DD` and nothing else. The week-date form
+  is what makes the difference load-bearing rather than cosmetic:
+  `date.fromisoformat("2024-W37-1")` returns `2024-09-09`, a different date
+  than the string reads as. The `parse_iso_date()` helper matches
+  `^\d{4}-\d{2}-\d{2}$` and then constructs a `date`, so `2024-02-29` is
+  accepted and `2024-02-30` is rejected. It is used at construction *and* at
+  every parsing site, so validation and parsing cannot diverge.
 
   Non-string input (`None`, a real `datetime.date`) now raises `ValueError` at
   construction rather than a bare `TypeError` from inside a property.
@@ -137,7 +162,7 @@ not have a success-shaped return.**
 - **`cdfifund/exceptions.py`** — `CDFIFundTrackerError` (base) and
   `CDFIFundDownloadError` (subclass). Both exported from the package root and
   listed in `__all__`. The package previously had no exception module.
-- **`.github/workflows/ci.yml`** — install and test on Python 3.9–3.12 for
+- **`.github/workflows/ci.yml`** — install and test on Python 3.11–3.14 for
   every push and PR to `main`. Never publishes, never requests `id-token`.
 - **`.github/workflows/release.yml`** — tag-triggered six-job release
   pipeline: `verify-version` → `build` → (`test-wheel`, `test-sdist`) →
@@ -174,10 +199,13 @@ not have a success-shaped return.**
   unaffected, and keeps its existing pin, which is correctly the *dereferenced*
   commit of annotated tag v1.14.0 rather than the tag object.
 
-  The matrix jobs now pin `runs-on: ubuntu-24.04` instead of `ubuntu-latest`.
-  `actions/python-versions` ships no Python 3.9 build for ubuntu-26.04, and 3.9
-  is this package's declared floor, so `ubuntu-latest` would break the release
-  gate whenever the runner image rolls forward.
+  The matrix jobs run on `ubuntu-latest`. An earlier revision of this release
+  pinned them to `ubuntu-24.04`, because `actions/python-versions` ships no
+  Python 3.9 build for ubuntu-26.04 and 3.9 was then the declared floor.
+  Raising the floor to 3.11 removed that constraint — every version in the
+  current matrix (3.11–3.14) has both an ubuntu-24.04 and an ubuntu-26.04
+  build — so the pin and its rationale were removed rather than left in place
+  explaining a problem the package no longer has.
 - **`CHANGELOG.md`** — this file.
 
 ### Fixed

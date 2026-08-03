@@ -33,6 +33,9 @@ Implementing real CDFI Fund ingestion is out of scope for 0.2.0 and is not curre
 pip install cdfi-fund-tracker
 ```
 
+**Requires Python 3.11 or newer.** No third-party dependencies — `dependencies = []`.
+Tested on 3.11, 3.12, 3.13, and 3.14.
+
 ## Quickstart
 
 ```python
@@ -334,7 +337,7 @@ All three date fields are checked at construction against a strict `YYYY-MM-DD` 
 ValueError: deadline must be YYYY-MM-DD, got '09/01/2026'
 ```
 
-The check is **not** `date.fromisoformat`, deliberately. On Python 3.9/3.10 that function accepts only `YYYY-MM-DD`; on 3.11+ it also accepts the compact form `20240915` and ISO week dates like `2024-W37-1`. This package supports 3.9 through 3.12, so using it would make the same record valid on one interpreter and invalid on another. A guard whose verdict depends on the interpreter is unreproducible, which is worse than no guard.
+The check is **not** `date.fromisoformat`, deliberately — this package is stricter than the stdlib here, and means to be. On every supported Python (3.11+), `fromisoformat` accepts the full ISO 8601 date grammar, including the compact form `20240915` and ISO week dates like `2024-W37-1`. This package's contract is `YYYY-MM-DD` and nothing else. The week-date form is why that matters: `date.fromisoformat("2024-W37-1")` returns `2024-09-09` — a **different date** than the string reads as to anyone scanning a spreadsheet column. A date field that silently means something other than it appears to is worse than one that raises, so `parse_iso_date` admits exactly one form.
 
 Passing a non-string raises `ValueError`, not `TypeError`. A null CSV field and a real `date` object are both natural mistakes, and through 0.2.0's build they surfaced as a bare `TypeError` from inside a property — well away from the line that caused it.
 
@@ -440,7 +443,7 @@ Every one of these assumes **you have already loaded award data yourself**. This
 python -m pytest
 ```
 
-341 tests, all passing. The suite includes tests that execute this README's
+342 tests, all passing. The suite includes tests that execute this README's
 quickstart end to end and check the claims on this page — including this count,
 the exhaustiveness of the constraints table above, and, for every documented
 vocabulary, that an invalid value actually raises.

@@ -43,7 +43,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python 3.12
-        # 3.12 (not the 3.9 floor) so that tomllib is in the stdlib.
+        # This job parses pyproject.toml with `tomllib`, which entered the
+        # stdlib in 3.11 — i.e. it is available on every version this package
+        # now supports, so no version here is load-bearing for that reason.
+        # Pinned anyway, rather than left to the runner default, so the guard
+        # runs on a fixed interpreter instead of one that changes underneath it.
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -145,18 +149,14 @@ jobs:
   test-wheel:
     name: test wheel (py${{ matrix.python-version }})
     needs: [build]
-    # Pinned, not `ubuntu-latest`. actions/python-versions ships no Python
-    # 3.9 build for ubuntu-26.04, and 3.9 is this package's declared floor
-    # (`requires-python = ">=3.9"`). `ubuntu-latest` resolves to 24.04 today,
-    # but when it rolls to 26.04 the 3.9 leg of this matrix stops resolving and
-    # the release gate breaks on a runner-image change nobody made. Verified
-    # against the manifest: 3.9.25 has 22.04 and 24.04 builds and no 26.04 one.
-    # Raise this deliberately when the support floor is raised.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # Mirrors ci.yml. 3.11 is the declared floor; 3.14 is the newest stable
+        # CPython actions/python-versions ships. All four have ubuntu-24.04 and
+        # ubuntu-26.04 builds, so `ubuntu-latest` resolves across the image roll.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout (for the tests/ directory only)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -239,18 +239,14 @@ jobs:
   test-sdist:
     name: test sdist (py${{ matrix.python-version }})
     needs: [build]
-    # Pinned, not `ubuntu-latest`. actions/python-versions ships no Python
-    # 3.9 build for ubuntu-26.04, and 3.9 is this package's declared floor
-    # (`requires-python = ">=3.9"`). `ubuntu-latest` resolves to 24.04 today,
-    # but when it rolls to 26.04 the 3.9 leg of this matrix stops resolving and
-    # the release gate breaks on a runner-image change nobody made. Verified
-    # against the manifest: 3.9.25 has 22.04 and 24.04 builds and no 26.04 one.
-    # Raise this deliberately when the support floor is raised.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # Mirrors ci.yml. 3.11 is the declared floor; 3.14 is the newest stable
+        # CPython actions/python-versions ships. All four have ubuntu-24.04 and
+        # ubuntu-26.04 builds, so `ubuntu-latest` resolves across the image roll.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       # NOTE: deliberately NO actions/checkout here. Nothing in this job may
       # come from the repository — if the checkout is absent, it cannot leak in.
