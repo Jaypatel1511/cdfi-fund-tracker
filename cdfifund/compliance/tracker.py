@@ -3,7 +3,12 @@
 from datetime import date
 from typing import List, Dict, Any, Optional
 
-from cdfifund.data.schema import Award, ComplianceRecord, COMPLIANCE_STATUS_CODES
+from cdfifund.data.schema import (
+    Award,
+    ComplianceRecord,
+    COMPLIANCE_STATUS_CODES,
+    parse_iso_date,
+)
 
 
 class ComplianceTracker:
@@ -19,11 +24,24 @@ class ComplianceTracker:
         self.records = records
 
     def at_risk(self) -> List[ComplianceRecord]:
-        """Return records that are at risk of non-compliance."""
+        """Return records at risk of non-compliance: behind pace, deadline ahead.
+
+        Delegates to :attr:`ComplianceRecord.is_at_risk` -- forward-looking,
+        below 50% deployed, deadline within the next 180 days. Disjoint from
+        :meth:`overdue`.
+
+        .. versionchanged:: 0.2.0
+            No longer includes records whose deadline has already passed;
+            those are returned by :meth:`overdue`. See
+            :attr:`ComplianceRecord.is_at_risk`.
+        """
         return [r for r in self.records if r.is_at_risk]
 
     def overdue(self) -> List[ComplianceRecord]:
-        """Return records that are past deadline with incomplete deployment."""
+        """Return records past deadline with incomplete deployment.
+
+        Disjoint from :meth:`at_risk`.
+        """
         return [r for r in self.records if r.is_overdue]
 
     def on_track(self) -> List[ComplianceRecord]:
@@ -31,7 +49,12 @@ class ComplianceTracker:
         return [r for r in self.records if r.status in ("on_track", "completed")]
 
     def summary(self) -> Dict[str, Any]:
-        """Return a portfolio-level compliance summary."""
+        """Return a portfolio-level compliance summary.
+
+        ``at_risk_count`` and ``overdue_count`` are disjoint as of 0.2.0; in
+        0.1.0 a record with a past deadline and low deployment was counted in
+        both. Both counts are relative to ``date.today()``.
+        """
         total = len(self.records)
         at_risk = self.at_risk()
         overdue = self.overdue()
@@ -92,39 +115,59 @@ def check_deadlines(
 ) -> Dict[str, Any]:
     """Identify records with deadlines falling within a forward-looking window.
 
+    Evaluated against ``date.today()``, so results change over time for an
+    unchanged input.
+
+    Every record is accounted for: a record appears in ``upcoming_deadlines``,
+    in ``overdue``, or in neither because it is fully deployed or its deadline
+    is beyond the horizon. No record is dropped for being unparseable.
+
     Args:
         records: List of ComplianceRecord objects.
         horizon_days: Number of days ahead to check (default 180).
 
     Returns:
         Dict with upcoming_deadlines list and counts.
+
+    Raises:
+        ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
+            string. Unreachable for records constructed normally, since
+            :class:`~cdfifund.data.schema.ComplianceRecord` validates it. The
+            message names the offending record's ``recipient_id``; the batch
+            aborts on the first one.
+
+    .. versionchanged:: 0.2.0
+        Records with a malformed ``deadline`` used to be silently skipped,
+        appearing in neither list while still counting toward the denominator
+        elsewhere. Deadlines are now validated at construction, and this
+        function raises rather than dropping.
     """
     today = date.today()
     upcoming = []
     overdue = []
 
     for r in records:
-        try:
-            dl = date.fromisoformat(r.deadline)
-            days_remaining = (dl - today).days
-            if days_remaining < 0 and r.deployment_pct < 1.0:
-                overdue.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deadline": r.deadline,
-                    "deployment_pct": r.deployment_pct,
-                    "days_overdue": abs(days_remaining),
-                })
-            elif 0 <= days_remaining <= horizon_days and r.deployment_pct < 1.0:
-                upcoming.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deadline": r.deadline,
-                    "deployment_pct": r.deployment_pct,
-                    "days_remaining": days_remaining,
-                })
-        except ValueError:
-            continue
+        # Identity in the field name: this loop aborts the whole batch, so the
+        # message has to say which record did it. See
+        # ComplianceRecord._deadline_field_name.
+        dl = parse_iso_date(r.deadline, r._deadline_field_name())
+        days_remaining = (dl - today).days
+        if days_remaining < 0 and r.deployment_pct < 1.0:
+            overdue.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deadline": r.deadline,
+                "deployment_pct": r.deployment_pct,
+                "days_overdue": abs(days_remaining),
+            })
+        elif 0 <= days_remaining <= horizon_days and r.deployment_pct < 1.0:
+            upcoming.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deadline": r.deadline,
+                "deployment_pct": r.deployment_pct,
+                "days_remaining": days_remaining,
+            })
 
     return {
         "upcoming_deadlines": sorted(upcoming, key=lambda x: x["days_remaining"]),
@@ -142,6 +185,16 @@ def at_risk_recipients(
 ) -> List[Dict[str, Any]]:
     """Return recipient IDs and details for at-risk deployment records.
 
+    "At risk" is forward-looking: below ``threshold_pct`` deployed with a
+    deadline that is still ahead but no more than ``days_window`` days out.
+    Records whose deadline has already passed are NOT returned here -- they are
+    overdue, a distinct state, reported by :func:`check_deadlines` under the
+    ``overdue`` key and by :attr:`ComplianceRecord.is_overdue`. This matches
+    :attr:`ComplianceRecord.is_at_risk` as of 0.2.0.
+
+    Evaluated against ``date.today()``, so results change over time for an
+    unchanged input. No record is dropped for being unparseable.
+
     Args:
         records: List of ComplianceRecord objects.
         threshold_pct: Deployment percentage below which a record is "at risk".
@@ -150,24 +203,30 @@ def at_risk_recipients(
     Returns:
         List of dicts with recipient_id, program, deployment_pct, deadline,
         and days_remaining, sorted by days_remaining ascending.
+
+    Raises:
+        ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
+            string, naming that record's ``recipient_id``. See
+            :func:`check_deadlines`.
+
+    .. versionchanged:: 0.2.0
+        Records with a malformed ``deadline`` used to be silently skipped.
     """
     today = date.today()
     results = []
 
     for r in records:
-        try:
-            dl = date.fromisoformat(r.deadline)
-            days_remaining = (dl - today).days
-            if r.deployment_pct < threshold_pct and 0 <= days_remaining <= days_window:
-                results.append({
-                    "recipient_id": r.recipient_id,
-                    "program": r.program,
-                    "deployment_pct": r.deployment_pct,
-                    "deadline": r.deadline,
-                    "days_remaining": days_remaining,
-                    "shortfall_pct": threshold_pct - r.deployment_pct,
-                })
-        except ValueError:
-            continue
+        # Identity in the field name; see check_deadlines.
+        dl = parse_iso_date(r.deadline, r._deadline_field_name())
+        days_remaining = (dl - today).days
+        if r.deployment_pct < threshold_pct and 0 <= days_remaining <= days_window:
+            results.append({
+                "recipient_id": r.recipient_id,
+                "program": r.program,
+                "deployment_pct": r.deployment_pct,
+                "deadline": r.deadline,
+                "days_remaining": days_remaining,
+                "shortfall_pct": threshold_pct - r.deployment_pct,
+            })
 
     return sorted(results, key=lambda x: x["days_remaining"])

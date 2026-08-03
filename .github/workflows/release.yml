@@ -1,0 +1,390 @@
+name: Release
+
+# Release / publish pipeline. Triggered ONLY by pushing a version tag (v*).
+# Six jobs, each gating the next:
+#   verify-version -> build -> test-wheel  -> twine-check -> publish
+#                           \-> test-sdist -/
+#
+# test-wheel and test-sdist both consume the `build` artifact and both gate
+# twine-check. They are separate jobs because they answer different questions:
+# test-wheel asks "does the installed package work on every supported Python?",
+# test-sdist asks "is the source distribution complete?" — a question the wheel
+# job structurally cannot answer, because it sources tests/ from the checkout.
+#
+# Publishing is OIDC Trusted Publisher only (no API token). The PyPI Trusted
+# Publisher for this project is registered against workflow file `release.yml`
+# and environment `pypi` — the filename of THIS file and the `environment:` key
+# on the publish job below are both load-bearing. Renaming either breaks the
+# OIDC claim match and PyPI will reject the upload.
+#
+# Working principle #8: never publish from a local working tree. Every artifact
+# that reaches PyPI is built here, from the tagged commit.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Default least privilege for every job. The publish job overrides this to add
+# the single elevated scope it needs (id-token: write); no other job is elevated.
+permissions:
+  contents: read
+
+jobs:
+  # 1. Drift guard. This repo carries the version in THREE places — pyproject.toml,
+  #    setup.py and cdfifund/__init__.py. All three must agree with each other
+  #    AND with the tag. pyproject is parsed with tomllib and the two Python
+  #    files with ast; nothing is string-scraped and nothing is executed.
+  verify-version:
+    name: Verify tag matches all three version sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.12
+        # This job parses pyproject.toml with `tomllib`, which entered the
+        # stdlib in 3.11 — i.e. it is available on every version this package
+        # now supports, so no version here is load-bearing for that reason.
+        # Pinned anyway, rather than left to the runner default, so the guard
+        # runs on a fixed interpreter instead of one that changes underneath it.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare tag to pyproject.toml, setup.py and __init__.py
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast, os, pathlib, sys, tomllib
+
+          PACKAGE_INIT = "cdfifund/__init__.py"
+
+          tag = os.environ["TAG"]
+          expected = tag[1:] if tag.startswith("v") else tag
+
+          def from_pyproject(path="pyproject.toml"):
+              with open(path, "rb") as fh:
+                  return tomllib.load(fh)["project"]["version"]
+
+          def from_setup_py(path="setup.py"):
+              tree = ast.parse(pathlib.Path(path).read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "setup":
+                      for kw in node.keywords:
+                          if kw.arg == "version":
+                              if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, str):
+                                  sys.exit(f"::error::{path}: version= is not a string literal; cannot verify")
+                              return kw.value.value
+              sys.exit(f"::error::{path}: no setup(version=...) call found")
+
+          def from_dunder(path):
+              tree = ast.parse(pathlib.Path(path).read_text())
+              for node in tree.body:
+                  if isinstance(node, ast.Assign):
+                      for target in node.targets:
+                          if isinstance(target, ast.Name) and target.id == "__version__":
+                              if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+                                  sys.exit(f"::error::{path}: __version__ is not a string literal")
+                              return node.value.value
+              sys.exit(f"::error::{path}: no top-level __version__ assignment found")
+
+          found = {
+              "pyproject.toml": from_pyproject(),
+              "setup.py": from_setup_py(),
+              PACKAGE_INIT: from_dunder(PACKAGE_INIT),
+          }
+
+          print(f"{'git tag':<24}: {tag}")
+          print(f"{'expected version':<24}: {expected}")
+          for source, version in found.items():
+              print(f"{source:<24}: {version}")
+
+          mismatched = {s: v for s, v in found.items() if v != expected}
+          if mismatched:
+              for source, version in mismatched.items():
+                  print(f"::error::{source} declares version '{version}', expected '{expected}' (from tag '{tag}')")
+              print("::error::Fix: make all three sources agree, commit, delete the tag, re-tag, push again.")
+              sys.exit(1)
+
+          print(f"Version guard passed: all {len(found)} sources agree at {expected}")
+          PY
+
+  # 2. Build wheel + sdist once, from the tagged commit. This artifact is the
+  #    single source of truth for every job below it — nothing is rebuilt.
+  build:
+    name: Build wheel and sdist
+    needs: [verify-version]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        # The runner checkout is always clean, so there is no stale-dist/ risk
+        # here — unlike a local tree, where `twine upload dist/*` can pick up
+        # artifacts from an earlier release.
+        run: |
+          set -euo pipefail
+          python -m pip install build
+          python -m build
+          ls -l dist/
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # 3. Install the built WHEEL (not -e, not the source tree) into a fresh venv on
+  #    every supported Python and run the suite against the installed artifact.
+  test-wheel:
+    name: test wheel (py${{ matrix.python-version }})
+    needs: [build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors ci.yml. 3.11 is the declared floor; 3.14 is the newest stable
+        # CPython actions/python-versions ships. All four have ubuntu-24.04 and
+        # ubuntu-26.04 builds, so `ubuntu-latest` resolves across the image roll.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout (for the tests/ directory only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install the wheel into a fresh venv and test it
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/wheel-venv"
+          VPY="${RUNNER_TEMP}/wheel-venv/bin/python"
+          "${VPY}" -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          echo "Installing wheel: ${WHEEL}"
+          "${VPY}" -m pip install "${WHEEL}" pytest
+
+          # Everything below runs from a clean dir that does NOT contain
+          # ./cdfifund. This is load-bearing, not tidiness: `python -c` puts the
+          # cwd on sys.path, so running these checks from the checkout root would
+          # import the SOURCE TREE and report a confident pass that says nothing
+          # about the wheel. Verified locally — from the repo root this resolves
+          # to ./cdfifund/__init__.py; from here it resolves into site-packages.
+          TESTDIR="${RUNNER_TEMP}/wheel-tests"
+          mkdir -p "${TESTDIR}"
+          cp -R tests "${TESTDIR}/tests"
+          # tests/test_readme.py executes the README quickstart and checks the
+          # claims on it (including the stated test count). Without README.md
+          # here those tests skip, and a README that has drifted out of sync
+          # with the shipped wheel would sail through the release gate.
+          cp README.md "${TESTDIR}/README.md"
+          cd "${TESTDIR}"
+
+          # Assert the import really came from the installed wheel. Without this
+          # the version check below could silently pass against source.
+          ORIGIN="$("${VPY}" -c 'import cdfifund; print(cdfifund.__file__)')"
+          echo "import resolved to    : ${ORIGIN}"
+          case "${ORIGIN}" in
+            *"/site-packages/"*) ;;
+            *) echo "::error::import cdfifund resolved to '${ORIGIN}', not the installed wheel"; exit 1 ;;
+          esac
+
+          # Confirm the installed package reports the tagged version. This is a
+          # second, independent check on the drift guard: job 1 read the source,
+          # this reads what setuptools actually put in the wheel.
+          INSTALLED="$("${VPY}" -c 'import cdfifund; print(cdfifund.__version__)')"
+          EXPECTED="${GITHUB_REF_NAME#v}"
+          echo "installed __version__ : ${INSTALLED}"
+          echo "expected (from tag)   : ${EXPECTED}"
+          if [ "${INSTALLED}" != "${EXPECTED}" ]; then
+            echo "::error::Installed wheel reports '${INSTALLED}', expected '${EXPECTED}'"
+            exit 1
+          fi
+
+          "${VPY}" -m pytest tests --import-mode=importlib
+
+  # 4. Install the built SDIST and run the suite THAT SHIPPED INSIDE IT.
+  #
+  #    This job exists because job 3 above cannot catch a broken sdist. It
+  #    copies tests/ from the git checkout, so it tests the checkout's suite
+  #    against the wheel — and the sdist could ship no tests at all, or half of
+  #    them, and every gate would still go green. That is exactly what happened:
+  #    0.2.0's sdist shipped tests/test_*.py without conftest.py (setuptools'
+  #    legacy default matches only `tests/test*.py`), so `pip install
+  #    <sdist> && pytest` gave 72 passed / 85 errors — every fixture-dependent
+  #    test failing at setup — while twine check --strict passed and the wheel
+  #    job went green.
+  #
+  #    The rule this encodes: a gate must consume the artifact it certifies.
+  #    Everything below comes from the tarball, never from the checkout.
+  test-sdist:
+    name: test sdist (py${{ matrix.python-version }})
+    needs: [build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors ci.yml. 3.11 is the declared floor; 3.14 is the newest stable
+        # CPython actions/python-versions ships. All four have ubuntu-24.04 and
+        # ubuntu-26.04 builds, so `ubuntu-latest` resolves across the image roll.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      # NOTE: deliberately NO actions/checkout here. Nothing in this job may
+      # come from the repository — if the checkout is absent, it cannot leak in.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Unpack the sdist, install it, and run its own suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDIST="$(ls dist/*.tar.gz)"
+          echo "sdist under test: ${SDIST}"
+
+          WORK="${RUNNER_TEMP}/sdist-work"
+          mkdir -p "${WORK}"
+          tar xzf "${SDIST}" -C "${WORK}"
+          SRC="$(find "${WORK}" -maxdepth 1 -mindepth 1 -type d)"
+          echo "unpacked to: ${SRC}"
+          echo "--- files the sdist actually contains ---"
+          tar tzf "${SDIST}"
+
+          # Fail with a sentence, not with 85 fixture errors. Without these the
+          # suite still "runs" — it just errors at collection in a way that
+          # reads like a broken test rather than broken packaging.
+          for required in tests/conftest.py tests/__init__.py CHANGELOG.md README.md; do
+            if [ ! -f "${SRC}/${required}" ]; then
+              echo "::error::sdist is missing ${required} — check MANIFEST.in (recursive-include tests *.py)"
+              exit 1
+            fi
+          done
+
+          python -m venv "${RUNNER_TEMP}/sdist-venv"
+          VPY="${RUNNER_TEMP}/sdist-venv/bin/python"
+          "${VPY}" -m pip install --upgrade pip
+          "${VPY}" -m pip install "${SDIST}" pytest
+
+          # Run from a directory containing ONLY what the sdist shipped, and
+          # NOT ./cdfifund. Running from ${SRC} itself would put the unpacked
+          # source tree on sys.path and silently test that instead of the
+          # installed package — verified locally: from the unpacked dir the
+          # import resolves to ./cdfifund/__init__.py, from here it resolves
+          # into site-packages.
+          TESTDIR="${RUNNER_TEMP}/sdist-tests"
+          mkdir -p "${TESTDIR}"
+          cp -R "${SRC}/tests" "${TESTDIR}/tests"
+          cp "${SRC}/README.md" "${TESTDIR}/README.md"
+          cd "${TESTDIR}"
+
+          ORIGIN="$("${VPY}" -c 'import cdfifund; print(cdfifund.__file__)')"
+          echo "import resolved to    : ${ORIGIN}"
+          case "${ORIGIN}" in
+            *"/site-packages/"*) ;;
+            *) echo "::error::import cdfifund resolved to '${ORIGIN}', not the installed sdist"; exit 1 ;;
+          esac
+
+          INSTALLED="$("${VPY}" -c 'import cdfifund; print(cdfifund.__version__)')"
+          EXPECTED="${GITHUB_REF_NAME#v}"
+          if [ "${INSTALLED}" != "${EXPECTED}" ]; then
+            echo "::error::Installed sdist reports '${INSTALLED}', expected '${EXPECTED}'"
+            exit 1
+          fi
+
+          # -p no:randomly etc. are not in play; a plain run is the point.
+          "${VPY}" -m pytest tests --import-mode=importlib
+
+      - name: Assert the sdist suite is not silently truncated
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDIST="$(ls dist/*.tar.gz)"
+          SHIPPED="$(tar tzf "${SDIST}" | grep -c '/tests/test_.*\.py$' || true)"
+          echo "test modules in sdist: ${SHIPPED}"
+          # A guard against the inverse failure: MANIFEST.in present but
+          # matching nothing, so the job passes by running almost no tests.
+          if [ "${SHIPPED}" -lt 7 ]; then
+            echo "::error::sdist ships only ${SHIPPED} test modules; expected at least 7"
+            exit 1
+          fi
+
+  # 5. Metadata gate. `twine check --strict` on BOTH artifacts: a README that
+  #    fails to render on PyPI, or missing/malformed metadata, fails here rather
+  #    than shipping a broken project page.
+  twine-check:
+    name: twine check (sdist + wheel)
+    needs: [test-wheel, test-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: twine check --strict
+        run: |
+          set -euo pipefail
+          python -m pip install twine
+          ls -l dist/
+          python -m twine check --strict dist/*
+
+  # 6. Publish to PyPI via OIDC Trusted Publishing, with PEP 740 attestations.
+  #    Needs all five gates green. This is the ONLY job with id-token: write,
+  #    and it uses no API token.
+  publish:
+    name: Publish to PyPI (Trusted Publisher / OIDC)
+    needs: [verify-version, build, test-wheel, test-sdist, twine-check]
+    runs-on: ubuntu-latest
+    # Required: the Trusted Publisher is registered against environment `pypi`.
+    # Without this key the OIDC claim will not match and PyPI rejects the upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cdfi-fund-tracker/
+    # Overrides the top-level read-only default: the single elevated scope, here only.
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          # Default is already true on v1.11+; stated explicitly so that a future
+          # action upgrade cannot silently drop provenance.
+          attestations: true

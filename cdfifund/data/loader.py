@@ -1,18 +1,33 @@
-"""Sample data loader and CDFI Fund data fetcher."""
+"""Synthetic sample data loader.
 
-import json
+This package ships no CDFI Fund ingestion path. :func:`load_sample_awards`
+returns synthetic fixtures for prototyping and testing;
+:func:`load_from_cdfi_fund_url` always raises.
+"""
+
 from typing import List, Optional
 
-from cdfifund.data.schema import Award, ComplianceRecord
+from cdfifund.data.schema import Award
+from cdfifund.exceptions import CDFIFundDownloadError
 
 
 def load_sample_awards() -> List[Award]:
-    """Return a realistic list of sample CDFI Fund awards for testing and demos.
+    """Return 24 SYNTHETIC sample awards for testing, demos, and prototyping.
 
-    Data is illustrative and calibrated to historical CDFI Fund award patterns.
+    These awards are invented. The recipient names, award IDs, dollar amounts,
+    dates, states, and congressional districts are all fabricated. They are
+    shaped to resemble historical CDFI Fund award patterns so that downstream
+    analytics have something plausible to chew on, but no row corresponds to a
+    real CDFI Fund award and none was sourced from the CDFI Fund.
+
+    Do not use this data for analysis, reporting, or any purpose where the
+    numbers are taken to mean something. To analyze real CDFI Fund awards,
+    construct :class:`~cdfifund.data.schema.Award` objects from a source you
+    control -- this package has no ingestion path of its own.
 
     Returns:
-        List of Award objects covering multiple programs, years, and geographies.
+        List of 24 synthetic Award objects covering all eight programs,
+        award years 2018-2024, and 24 states.
     """
     raw = [
         ("A2024-001", "Hope Community Capital", "loan_fund", "CDFI_FA", 1_500_000, "2024-09-15", 2024, "MS", 3, "Small business lending in rural Mississippi", "active"),
@@ -46,27 +61,46 @@ def load_sample_awards() -> List[Award]:
     return awards
 
 
-def load_from_cdfi_fund_url(url: Optional[str] = None) -> List[Award]:
-    """Attempt to fetch award data from a CDFI Fund URL, falling back to sample data.
+_NO_INGESTION_PATH = (
+    "cdfi-fund-tracker has no CDFI Fund ingestion path. No parser for any CDFI "
+    "Fund award format (CSV, XLSX, or API) was ever implemented in this package, "
+    "so load_from_cdfi_fund_url() cannot succeed for any URL and always raises.\n"
+    "\n"
+    "In version 0.1.0 this function returned sample data -- 24 synthetic sample "
+    "awards -- instead of raising, on every path, including when the HTTP fetch "
+    "SUCCEEDED. "
+    "Callers who passed a real CDFI Fund URL received invented awards presented "
+    "as real data, with no error and no signal, and those awards then flowed "
+    "into by_program(), by_state(), top_recipients(), "
+    "award_concentration_analysis(), and program_effectiveness_metrics(). "
+    "Any 0.1.0 result derived from this function should be discarded.\n"
+    "\n"
+    "The sample awards are still available, but only from the function that "
+    "says what they are: load_sample_awards(). They are synthetic and "
+    "illustrative -- not real CDFI Fund award records -- and must not be used "
+    "as a data source for analysis or reporting.\n"
+    "\n"
+    "To analyze real CDFI Fund data, build Award objects yourself from a source "
+    "you control and pass them to this package's analysis functions."
+)
 
-    In production, CDFI Fund publishes award data as downloadable spreadsheets.
-    This function attempts a basic fetch; on any error it returns sample data.
+
+def load_from_cdfi_fund_url(url: Optional[str] = None) -> List[Award]:
+    """Always raises: this package has no CDFI Fund ingestion path.
+
+    No parser for the CDFI Fund's published award formats was ever implemented,
+    so there is no input for which this function can legitimately succeed. It
+    raises unconditionally rather than silently substituting synthetic data --
+    including when ``url`` is None, and including when an HTTP fetch succeeds.
 
     Args:
-        url: Optional URL to fetch from. If None, uses the sample data fallback.
+        url: Ignored. Present only to preserve the 0.1.0 call signature so that
+            existing callers raise instead of failing with a TypeError.
 
-    Returns:
-        List of Award objects.
+    Raises:
+        CDFIFundDownloadError: Always, unconditionally.
+
+    See Also:
+        load_sample_awards: The only path to the synthetic sample fixtures.
     """
-    if url is None:
-        return load_sample_awards()
-
-    try:
-        import urllib.request
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            raw = resp.read()
-        # If we get here the fetch succeeded but we'd need parsing logic
-        # specific to the CDFI Fund's format. Fall back to sample data.
-        return load_sample_awards()
-    except Exception:
-        return load_sample_awards()
+    raise CDFIFundDownloadError(_NO_INGESTION_PATH)

@@ -1,10 +1,19 @@
 """
-cdfi-fund-tracker: CDFI Fund award & compliance tracker.
+cdfi-fund-tracker: CDFI Fund award analysis & compliance tracking.
 
-CDFI Program, BEA, NACA, Native American, RAPID, Capital Magnet Fund, and
-CDFI Bond Guarantee Program awards with compliance status tracking.
+Analysis and compliance tooling for CDFI Program FA/TA, BEA, NACA, Native
+American TA, RAPID, Capital Magnet Fund, and CDFI Bond Guarantee Program
+awards.
+
+BRING YOUR OWN DATA. This package has no CDFI Fund ingestion path -- no CSV,
+XLSX, or API reader exists anywhere in it, and ``dependencies = []``. You
+construct :class:`Award` objects yourself and pass them to the analysis
+functions. :func:`load_from_cdfi_fund_url` always raises
+:class:`CDFIFundDownloadError`; :func:`load_sample_awards` returns 24
+SYNTHETIC fixtures for prototyping only.
 """
 
+from cdfifund.exceptions import CDFIFundTrackerError, CDFIFundDownloadError
 from cdfifund.data.schema import (
     Award,
     Recipient,
@@ -12,6 +21,8 @@ from cdfifund.data.schema import (
     CDFI_PROGRAMS,
     RECIPIENT_TYPES,
     COMPLIANCE_STATUS_CODES,
+    US_STATES_AND_TERRITORIES,
+    parse_iso_date,
 )
 from cdfifund.data.loader import load_sample_awards, load_from_cdfi_fund_url
 from cdfifund.programs.cdfi_program import cdfi_program_analysis, fa_vs_ta_breakdown
@@ -39,9 +50,12 @@ from cdfifund.analysis.insights import (
     program_effectiveness_metrics,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
+    # Exceptions
+    "CDFIFundTrackerError",
+    "CDFIFundDownloadError",
     # Data
     "Award",
     "Recipient",
@@ -49,6 +63,8 @@ __all__ = [
     "CDFI_PROGRAMS",
     "RECIPIENT_TYPES",
     "COMPLIANCE_STATUS_CODES",
+    "US_STATES_AND_TERRITORIES",
+    "parse_iso_date",
     # Loader
     "load_sample_awards",
     "load_from_cdfi_fund_url",

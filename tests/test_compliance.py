@@ -112,3 +112,163 @@ class TestAtRiskRecipients:
         for r in result:
             assert "shortfall_pct" in r
             assert r["shortfall_pct"] > 0
+
+
+class TestAtRiskSemanticReconciliation:
+    """0.1.0 shipped two incompatible definitions of "at risk".
+
+    ComplianceRecord.is_at_risk used ``days_remaining <= 180``, which swept in
+    records whose deadline had ALREADY PASSED. at_risk_recipients() used
+    ``0 <= days_remaining <= days_window``, which excluded them. Same words,
+    different sets, and ComplianceTracker.at_risk() delegated to the first --
+    so summary() counted an overdue record in both at_risk_count and
+    overdue_count.
+
+    0.2.0 adopts the forward-looking semantic everywhere: at-risk means there
+    is still time left on the clock. A blown deadline is `is_overdue`, a
+    distinct and already-realized state. The two sets are now disjoint.
+    """
+
+    @staticmethod
+    def _record(days_offset, pct=0.10, status="at_risk"):
+        from datetime import date, timedelta
+
+        from cdfifund.data.schema import ComplianceRecord
+
+        deadline = (date.today() + timedelta(days=days_offset)).isoformat()
+        return ComplianceRecord("R-X", "CDFI_FA", pct, deadline, status, "2025-01-01")
+
+    def test_past_deadline_is_not_at_risk(self):
+        """THE case the two implementations disagreed on. 0.1.0: True."""
+        assert self._record(-30).is_at_risk is False
+
+    def test_past_deadline_is_overdue(self):
+        assert self._record(-30).is_overdue is True
+
+    def test_at_risk_and_overdue_are_disjoint(self):
+        for offset in (-400, -180, -30, -1, 0, 1, 30, 180, 181, 400):
+            r = self._record(offset)
+            assert not (r.is_at_risk and r.is_overdue), (
+                f"offset {offset} landed in both buckets"
+            )
+
+    def test_summary_does_not_double_count_an_overdue_record(self):
+        """0.1.0: at_risk_count=1 AND overdue_count=1 for a single record."""
+        tracker = ComplianceTracker([self._record(-30)])
+        summary = tracker.summary()
+        assert summary["total_records"] == 1
+        assert summary["at_risk_count"] == 0
+        assert summary["overdue_count"] == 1
+
+    def test_property_and_function_agree_on_past_deadline(self):
+        """The reconciliation: both implementations now return the same set."""
+        records = [self._record(-30)]
+        assert len(ComplianceTracker(records).at_risk()) == len(
+            at_risk_recipients(records)
+        ) == 0
+
+    def test_property_and_function_agree_across_the_deadline_range(self):
+        for offset in (-400, -180, -30, -1, 0, 1, 30, 179, 180, 181, 400):
+            records = [self._record(offset)]
+            via_property = len(ComplianceTracker(records).at_risk())
+            via_function = len(at_risk_recipients(records))
+            assert via_property == via_function, (
+                f"offset {offset}: property={via_property} function={via_function}"
+            )
+
+    def test_deadline_today_is_at_risk(self):
+        assert self._record(0).is_at_risk is True
+
+    def test_deadline_inside_window_is_at_risk(self):
+        assert self._record(179).is_at_risk is True
+
+    def test_deadline_at_window_boundary_is_at_risk(self):
+        assert self._record(180).is_at_risk is True
+
+    def test_deadline_beyond_window_is_not_at_risk(self):
+        assert self._record(181).is_at_risk is False
+
+    def test_well_deployed_record_inside_window_is_not_at_risk(self):
+        assert self._record(30, pct=0.80).is_at_risk is False
+
+    def test_malformed_deadline_is_rejected_at_construction(self):
+        """0.2.0 replaced silent-skip with a construction-time raise.
+
+        Through the fix release this record was constructible and then vanished
+        from every compliance report: is_at_risk and is_overdue both returned
+        False, check_deadlines() omitted it from both lists, and
+        at_risk_recipients() dropped it -- while summary()'s total_records
+        still counted it, producing a short numerator over a full denominator.
+        """
+        from cdfifund.data.schema import ComplianceRecord
+
+        with pytest.raises(ValueError, match="deadline must be YYYY-MM-DD"):
+            ComplianceRecord(
+                "R-BAD", "CDFI_FA", 0.10, "not-a-date", "at_risk", "2025-01-01"
+            )
+
+
+class TestBatchAbortIdentifiesTheRecord:
+    """A batch abort must name the record that caused it.
+
+    Removing the ``except ValueError`` handlers in 0.2.0 was correct -- the
+    dataclasses are mutable, so ``record.deadline = "garbage"`` reaches the
+    parse sites after construction, and silently reporting such a record as
+    "not at risk" is the under-counting this release exists to remove.
+
+    But the abort said only ``deadline must be YYYY-MM-DD, got 'garbage'``. With
+    one bad record at index 347 of 500 -- or a placeholder repeated across the
+    portfolio -- that message does not tell you which record to fix, and every
+    entry point aborts with the same text. The recipient_id is in hand at all
+    four parse sites; it now appears in the message.
+    """
+
+    @staticmethod
+    def _portfolio(bad_index=347, size=500):
+        from cdfifund.data.schema import ComplianceRecord
+
+        records = [
+            ComplianceRecord(
+                f"R-{i:04d}", "CDFI_FA", 0.10, "2030-01-01", "at_risk", "2025-01-01"
+            )
+            for i in range(size)
+        ]
+        # Reachable only post-construction; the dataclass is mutable.
+        records[bad_index].deadline = "garbage"
+        return records, records[bad_index].recipient_id
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda recs: ComplianceTracker(recs).summary(),
+            lambda recs: ComplianceTracker(recs).at_risk(),
+            lambda recs: ComplianceTracker(recs).overdue(),
+            lambda recs: check_deadlines(recs),
+            lambda recs: at_risk_recipients(recs),
+        ],
+        ids=["summary", "tracker.at_risk", "tracker.overdue",
+             "check_deadlines", "at_risk_recipients"],
+    )
+    def test_every_entry_point_names_the_offending_record(self, call):
+        records, bad_id = self._portfolio()
+        with pytest.raises(ValueError) as exc:
+            call(records)
+        msg = str(exc.value)
+        assert bad_id in msg, f"record identity missing from: {msg}"
+        assert "garbage" in msg, msg
+        assert "deadline" in msg, msg
+
+    def test_identity_distinguishes_a_repeated_placeholder(self):
+        """The case the finding turns on: same bad value, different records."""
+        records, _ = self._portfolio(bad_index=12, size=50)
+        records[40].deadline = "garbage"
+        with pytest.raises(ValueError) as exc:
+            check_deadlines(records)
+        # Aborts on the FIRST offender, and says which one it was.
+        assert "R-0012" in str(exc.value)
+        assert "R-0040" not in str(exc.value)
+
+    def test_still_raises_valueerror_not_a_new_type(self):
+        records, _ = self._portfolio(bad_index=0, size=3)
+        with pytest.raises(ValueError):
+            at_risk_recipients(records)
