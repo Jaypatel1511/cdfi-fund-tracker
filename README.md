@@ -274,9 +274,9 @@ Exhaustive: every field of every dataclass, validated or not. Anything marked *n
 | `Award.recipient_name` | **not validated** — free text, and the key aggregation groups on (see Limitations) |
 | `Award.recipient_type` | must be in `RECIPIENT_TYPES` |
 | `Award.program` | must be in `CDFI_PROGRAMS` |
-| `Award.award_amount` | must be a **finite** number `> 0`. `nan` and `inf` raise; so does a string or a bool |
+| `Award.award_amount` | must be a **finite** number `> 0`. Any real numeric type — `int`, `float`, `numpy` scalars, `Decimal`, `Fraction` — **stored as `float`** (see below). `nan`, `inf`, `Decimal('NaN')` raise; so does a string or a bool |
 | `Award.award_date` | must be `YYYY-MM-DD` and a real calendar date |
-| `Award.award_year` | must be an `int >= 1994`. **Not** cross-checked against `award_date` — see below |
+| `Award.award_year` | must be an integer `>= 1994` — `int` or any `numbers.Integral` such as `numpy.int64`, **stored as `int`**. A fractional year raises, and so does `Decimal`. **Not** cross-checked against `award_date` — see below |
 | `Award.state` | must be in `US_STATES_AND_TERRITORIES` |
 | `Award.congressional_district` | **not validated** — `int` or `None`; numbering is state-dependent and changes with redistricting, and nothing here consumes it |
 | `Award.intended_use` | **not validated** — free text by design |
@@ -290,8 +290,8 @@ Exhaustive: every field of every dataclass, validated or not. Anything marked *n
 | `Recipient.name` | **not validated** — free text |
 | `Recipient.type` | must be in `RECIPIENT_TYPES` |
 | `Recipient.certification_status` | must be `certified`, `applicant`, or `formerly_certified` |
-| `Recipient.total_awards` | must be a **finite** number `>= 0`. `nan` and `inf` raise |
-| `Recipient.programs_received` | every element must be in `CDFI_PROGRAMS`. An empty list is allowed |
+| `Recipient.total_awards` | must be a **finite** number `>= 0`, same accepted types as `Award.award_amount`, **stored as `float`**. `nan` and `inf` raise |
+| `Recipient.programs_received` | must be a `list`, `tuple`, or `set` — a bare string raises, even one spelling a valid code — and every element must be in `CDFI_PROGRAMS`. An empty container is allowed |
 | `Recipient.geographic_areas` | **not validated** — documented as states *or regions*, so it is not a state-code vocabulary |
 
 **`ComplianceRecord`**
@@ -300,10 +300,31 @@ Exhaustive: every field of every dataclass, validated or not. Anything marked *n
 |---|---|
 | `ComplianceRecord.recipient_id` | **not validated** — an opaque caller-side key; this package never resolves it against a `Recipient` |
 | `ComplianceRecord.program` | must be in `CDFI_PROGRAMS` |
-| `ComplianceRecord.deployment_pct` | must be a **finite** number `0.0 <= pct <= 1.0` — a **fraction**, not a percent. `50` raises; use `0.50` |
+| `ComplianceRecord.deployment_pct` | must be a **finite** number `0.0 <= pct <= 1.0` — a **fraction**, not a percent. `50` raises; use `0.50`. Same accepted types as `Award.award_amount`, **stored as `float`** |
 | `ComplianceRecord.deadline` | must be `YYYY-MM-DD` and a real calendar date |
 | `ComplianceRecord.status` | must be in `COMPLIANCE_STATUS_CODES` |
 | `ComplianceRecord.last_reporting_date` | must be `YYYY-MM-DD` and a real calendar date |
+
+#### Numbers: which types are accepted, and what is stored (changed in 0.2.0)
+
+The numeric fields take **any finite real number**, not just `int` and `float`. `numpy.int64`, `numpy.int32`, `numpy.float32`, `numpy.float64`, `decimal.Decimal` and `fractions.Fraction` are all accepted. This matters because this package's whole premise is that you build records from your own source: a plain integer dollar column read through pandas hands you a `numpy.int64` from `.iloc`, `.at`, `.loc`, `Series.iloc` and `.sum()`, and through 0.2.0's build every one of those raised `award_amount must be a number` — about a value that is, plainly, a number. `df.to_dict("records")` and `itertuples()` happened to yield Python `int` and worked, so whether your data loaded depended on which access pattern you reached for.
+
+**Accepted values are coerced to built-ins**, not stored as you passed them: the three dollar/fraction fields become `float`, and `award_year` becomes `int`.
+
+```
+a = Award(..., award_amount=Decimal("1500000"), award_year=numpy.int64(2024), ...)
+type(a.award_amount)   # <class 'float'>  — not Decimal
+type(a.award_year)     # <class 'int'>    — not numpy.int64
+```
+
+This is not new in kind — the field has been reassigned through a `float()` since the validator existed, so `award_amount=1_500_000` has always read back as `1500000.0`. 0.2.0 widens which types get in, not what happens to them after. Two reasons it coerces rather than storing what you passed:
+
+- **`Decimal + float` raises `TypeError`.** Every aggregation here sums these fields, so a single `Decimal` award in a portfolio of floats would abort `by_program()`. Accepting the type without converting it would have introduced a failure that did not previously exist.
+- **`numpy` scalars and `Decimal` are not JSON-serializable**, and `numpy.int64` is rejected as a dict *key* too — which is exactly how `by_year()` returns `award_year`. Nothing in this package serializes, so storing them as given would not fail *here*; it would fail in your code, one layer away from the constructor that admitted the value.
+
+The cost, stated plainly: an exact `Decimal("1500000.07")` becomes a float and stops being exact. If you need decimal exactness end to end, this package cannot give it to you — every downstream computation is float arithmetic, so the exactness would not survive the first division either way.
+
+`bool` is still rejected everywhere (`True` is an `int` in Python, and a `True` award is not a $1.00 award), as are `nan`, `inf`, `Decimal('NaN')`, `Decimal('Infinity')`, strings, and `None`. A value too large to represent as a float — `10**400` — raises `ValueError` naming the field, where it previously escaped as an `OverflowError`.
 
 #### Dates: what "valid" means, and why not `date.fromisoformat`
 
@@ -342,6 +363,14 @@ The `except ValueError` handlers that implemented the silent skip were **removed
 ### `is_at_risk` and `is_overdue` can raise
 
 Both properties, and `check_deadlines()` / `at_risk_recipients()`, raise `ValueError` on an unreadable `deadline`. For a normally-constructed record this cannot happen. It is reachable only by mutating `deadline` after construction, which a mutable dataclass permits and this package does not defend against beyond failing loudly.
+
+**The error names the offending record** (added in 0.2.0). These are batch entry points: one bad deadline at index 347 of 500 aborts `summary()`, `.at_risk()`, `.overdue()`, `check_deadlines()` and `at_risk_recipients()` alike, and until 0.2.0 all five said only `deadline must be YYYY-MM-DD, got 'garbage'` — no index, no `recipient_id`. With a placeholder repeated across a portfolio, that message could not tell you which record to fix. It now reads:
+
+```
+ValueError: deadline (recipient_id='R-0347') must be YYYY-MM-DD, got 'garbage'
+```
+
+The batch still aborts on the **first** offender rather than collecting them all, so fixing a portfolio with several bad deadlines takes several passes. Construction-time errors are unchanged and do not carry the identity — there you have the record in hand and the traceback points at your own call site.
 
 ### "At risk" is forward-looking (changed in 0.2.0)
 
@@ -411,10 +440,16 @@ Every one of these assumes **you have already loaded award data yourself**. This
 python -m pytest
 ```
 
-254 tests, all passing. The suite includes tests that execute this README's
+341 tests, all passing. The suite includes tests that execute this README's
 quickstart end to end and check the claims on this page — including this count,
 the exhaustiveness of the constraints table above, and, for every documented
 vocabulary, that an invalid value actually raises.
+
+Six of those exercise `numpy` scalar types and skip automatically where `numpy`
+is absent — it is not a dependency of this package and CI does not install it.
+The rest of the numeric-type coverage runs on stdlib `Decimal` and `Fraction`,
+which exercise the same guard, so nothing about it depends on a third-party
+package being present.
 
 ## Changelog
 

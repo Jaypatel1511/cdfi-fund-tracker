@@ -1,9 +1,11 @@
 """Data structures and constants for CDFI Fund award tracking."""
 
 import math
+import numbers
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Dict, List, Optional, Any
 
 
@@ -63,7 +65,7 @@ def parse_iso_date(value: Any, field_name: str) -> date:
 
 
 def _validate_finite(value: Any, field_name: str) -> float:
-    """Return ``value`` as a float, rejecting non-numeric and non-finite input.
+    """Return ``value`` as a ``float``, rejecting non-numeric and non-finite input.
 
     ``float('nan')`` defeats every ordinary bounds check by returning False from
     *both* sides of a comparison: ``nan <= 0`` is False, so ``if x <= 0: raise``
@@ -72,32 +74,116 @@ def _validate_finite(value: Any, field_name: str) -> float:
     package's documented workflow is for callers to build records from their own
     source. ``inf`` is rejected for the same reason.
 
-    Booleans are rejected because ``isinstance(True, int)`` is True, so a stray
-    ``True`` would otherwise be accepted as a $1.00 award.
+    **The type gate is an ABC check, not a concrete-type check.** Through the
+    0.2.0 build this read ``isinstance(value, (int, float))``, which accepted
+    ``numpy.float64`` only because that type happens to subclass ``float``, and
+    refused ``numpy.int64``, ``numpy.int32``, ``numpy.float32``,
+    ``decimal.Decimal`` and ``fractions.Fraction`` -- every one of them a finite
+    number -- with the message "must be a number". A plain integer dollar column
+    read through pandas produces ``numpy.int64`` from ``.iloc``, ``.at``,
+    ``.loc``, ``Series.iloc`` and ``.sum()``, so the package's own documented
+    workflow hit it, and which access pattern the caller reached for decided
+    whether their data loaded at all.
+
+    ``numbers.Real`` covers the numpy scalars and ``Fraction``. ``Decimal`` is
+    checked separately because it is deliberately NOT registered as
+    ``numbers.Real`` -- and it is arguably the most correct type for a currency
+    field, so an ABC check alone would still have refused it.
+
+    Booleans are rejected explicitly, and must stay that way: ``bool`` is both
+    ``numbers.Real`` and ``numbers.Integral``, so without this clause
+    ``Award(award_amount=True)`` would construct as a $1.00 award.
+
+    The return value is a built-in ``float``, so accepted foreign types are
+    COERCED rather than stored as given. See :class:`Award` for why.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (numbers.Real, Decimal)):
         raise ValueError(
             f"{field_name} must be a number, got {type(value).__name__} {value!r}"
         )
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except (ValueError, OverflowError):
+        # math.isfinite does not always answer the question for a value that
+        # passed the type gate. Decimal('sNaN') raises ValueError, and an int or
+        # Fraction too large to convert to float raises OverflowError -- which
+        # is not a ValueError at all, so `Award(award_amount=10**400)` escaped
+        # this package's convention that every constructor violation is a
+        # ValueError. Both mean "not a usable finite number", which is what the
+        # caller needs to be told, with the field named.
+        finite = False
+    if not finite:
         raise ValueError(f"{field_name} must be a finite number, got {value!r}")
     return float(value)
+
+
+def _validate_integral(value: Any, field_name: str) -> int:
+    """Return ``value`` as a built-in ``int``, rejecting non-integral input.
+
+    The integer counterpart of :func:`_validate_finite`, and it exists for the
+    same reason: the check it replaced was ``isinstance(value, int)``, which
+    refused ``numpy.int64`` -- what a plain integer year column yields from
+    pandas -- while reporting that the value was not an int.
+
+    ``numbers.Integral`` rather than ``numbers.Real``: this gates a year, and a
+    fractional year is not a valid input. That also excludes ``Decimal``, which
+    :func:`_validate_finite` accepts; a year is a count, not a currency amount,
+    so there is no exactness argument for it. ``bool`` is excluded explicitly
+    for the same reason as in :func:`_validate_finite`.
+
+    Every ``numbers.Integral`` is finite by construction -- there is no integral
+    NaN or infinity -- so there is no finiteness check here.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(
+            f"{field_name} must be an int, got {type(value).__name__} {value!r}"
+        )
+    return int(value)
 
 
 @dataclass
 class Award:
     """Represents a single CDFI Fund award.
 
+    **Numeric fields are coerced to built-ins at construction.** ``award_amount``
+    is stored as a ``float`` and ``award_year`` as an ``int``, whatever numeric
+    type you pass -- ``numpy.int64``, ``numpy.float32``, ``decimal.Decimal`` and
+    ``fractions.Fraction`` are all accepted and all converted. This is not new
+    in kind: the field has been reassigned through a ``float()`` since the
+    validator was introduced, so ``award_amount=1_500_000`` has always read back
+    as ``1500000.0``. 0.2.0 widens which types get in, not what happens to them
+    afterwards.
+
+    Coercion rather than store-as-given, deliberately:
+
+    * ``Decimal + float`` raises TypeError. Every aggregation in this package
+      sums this field, so one ``Decimal`` award in a portfolio of floats would
+      abort :func:`~cdfifund.analysis.aggregations.by_program` -- a failure that
+      does not exist today and that accepting the type without converting it
+      would have introduced.
+    * ``numpy`` scalars and ``Decimal`` are not JSON-serializable, and
+      ``numpy.int64`` is rejected as a dict *key* too, which is how
+      :func:`~cdfifund.analysis.aggregations.by_year` returns ``award_year``.
+      Nothing in this package serializes, so storing them as given would not
+      fail here -- it would fail in the caller's code, one layer removed from
+      the constructor that let the value in.
+
+    The cost is that an exact ``Decimal("1500000.07")`` becomes a float and
+    stops being exact. That trade is forced: the field is annotated ``float``
+    and every downstream computation is float arithmetic, so the exactness
+    would not survive the first division regardless.
+
     Attributes:
         award_id: Unique identifier for the award.
         recipient_name: Legal name of the awardee.
         recipient_type: Category of institution (see RECIPIENT_TYPES).
         program: CDFI Fund program name (see CDFI_PROGRAMS keys).
-        award_amount: Dollar amount awarded.
+        award_amount: Dollar amount awarded. Any finite real number or
+            ``Decimal``; stored as ``float``.
         award_date: Award announcement date (YYYY-MM-DD string). Validated.
-        award_year: Fiscal year of the award. Validated as an int >= 1994; see
-            :meth:`__post_init__` for why it is NOT cross-checked against
-            ``award_date``.
+        award_year: Fiscal year of the award. Any integral type >= 1994, stored
+            as ``int``; see :meth:`__post_init__` for why it is NOT
+            cross-checked against ``award_date``.
         state: Two-letter USPS code for a state, DC, or a US territory (see
             US_STATES_AND_TERRITORIES). Uppercase, exact.
         congressional_district: Congressional district number or None. NOT
@@ -160,11 +246,7 @@ class Award:
         # no award predates it. There is no upper bound, deliberately: a ceiling
         # tied to the current date would make construction date-relative, the
         # exact hazard this package already warns about for compliance results.
-        if isinstance(self.award_year, bool) or not isinstance(self.award_year, int):
-            raise ValueError(
-                f"award_year must be an int, got "
-                f"{type(self.award_year).__name__} {self.award_year!r}"
-            )
+        self.award_year = _validate_integral(self.award_year, "award_year")
         if self.award_year < 1994:
             raise ValueError(
                 f"award_year must be >= 1994 (the CDFI Fund was created in "
@@ -223,6 +305,26 @@ class Recipient:
         if self.type not in RECIPIENT_TYPES:
             raise ValueError(
                 f"type must be one of {list(RECIPIENT_TYPES)}, got {self.type!r}"
+            )
+        # Type-gate the container before iterating it. Two things went wrong
+        # when the loop was the only check:
+        #
+        # `None` -- what a null CSV cell becomes -- raised TypeError
+        # ("'NoneType' object is not iterable") from the loop rather than
+        # ValueError, contradicting the convention parse_iso_date's docstring
+        # states outright: a null cell should surface "as the same error type as
+        # every other constructor violation".
+        #
+        # A bare string "CDFI_FA" is iterable, so it was rejected -- but
+        # character by character, and the message named the offending value as
+        # 'C'. A caller who forgot the brackets got an error quoting a value
+        # they never wrote. str is excluded from the accepted types on purpose:
+        # it is a sequence, but not a sequence of program codes.
+        if not isinstance(self.programs_received, (list, tuple, set)):
+            raise ValueError(
+                f"programs_received must be a list, tuple, or set of program "
+                f"codes, got {type(self.programs_received).__name__} "
+                f"{self.programs_received!r}"
             )
         for prog in self.programs_received:
             if prog not in CDFI_PROGRAMS:
@@ -283,6 +385,25 @@ class ComplianceRecord:
         parse_iso_date(self.deadline, "deadline")
         parse_iso_date(self.last_reporting_date, "last_reporting_date")
 
+    def _deadline_field_name(self) -> str:
+        """Field name for deadline parse errors, carrying this record's identity.
+
+        Batch entry points evaluate every record in a portfolio, so an abort
+        must say WHICH record caused it. Without the identity, one bad deadline
+        at index 347 of 500 aborts :meth:`ComplianceTracker.summary`,
+        :meth:`~cdfifund.compliance.tracker.ComplianceTracker.at_risk`,
+        :meth:`~cdfifund.compliance.tracker.ComplianceTracker.overdue`,
+        :func:`~cdfifund.compliance.tracker.check_deadlines` and
+        :func:`~cdfifund.compliance.tracker.at_risk_recipients` with the same
+        text -- and if the bad value is a placeholder repeated across the
+        portfolio, the message cannot distinguish the offenders.
+
+        Deliberately NOT used by :meth:`__post_init__`. At construction the
+        caller has the record in hand and the traceback points at their own
+        call site; the identity only earns its noise in a batch.
+        """
+        return f"deadline (recipient_id={self.recipient_id!r})"
+
     @property
     def is_at_risk(self) -> bool:
         """True if below 50% deployed with a deadline still ahead, within 180 days.
@@ -321,7 +442,7 @@ class ComplianceRecord:
             such a record as "not at risk" is the under-counting this release
             exists to remove.
         """
-        dl = parse_iso_date(self.deadline, "deadline")
+        dl = parse_iso_date(self.deadline, self._deadline_field_name())
         days_remaining = (dl - date.today()).days
         return self.deployment_pct < 0.50 and 0 <= days_remaining <= 180
 
@@ -338,7 +459,7 @@ class ComplianceRecord:
         .. versionchanged:: 0.2.0
             A malformed ``deadline`` used to return False; it now raises.
         """
-        dl = parse_iso_date(self.deadline, "deadline")
+        dl = parse_iso_date(self.deadline, self._deadline_field_name())
         return dl < date.today() and self.deployment_pct < 1.0
 
 

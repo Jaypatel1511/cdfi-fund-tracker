@@ -132,7 +132,9 @@ def check_deadlines(
     Raises:
         ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
             string. Unreachable for records constructed normally, since
-            :class:`~cdfifund.data.schema.ComplianceRecord` validates it.
+            :class:`~cdfifund.data.schema.ComplianceRecord` validates it. The
+            message names the offending record's ``recipient_id``; the batch
+            aborts on the first one.
 
     .. versionchanged:: 0.2.0
         Records with a malformed ``deadline`` used to be silently skipped,
@@ -145,7 +147,10 @@ def check_deadlines(
     overdue = []
 
     for r in records:
-        dl = parse_iso_date(r.deadline, "deadline")
+        # Identity in the field name: this loop aborts the whole batch, so the
+        # message has to say which record did it. See
+        # ComplianceRecord._deadline_field_name.
+        dl = parse_iso_date(r.deadline, r._deadline_field_name())
         days_remaining = (dl - today).days
         if days_remaining < 0 and r.deployment_pct < 1.0:
             overdue.append({
@@ -201,7 +206,8 @@ def at_risk_recipients(
 
     Raises:
         ValueError: If any record's ``deadline`` is not a valid ``YYYY-MM-DD``
-            string. See :func:`check_deadlines`.
+            string, naming that record's ``recipient_id``. See
+            :func:`check_deadlines`.
 
     .. versionchanged:: 0.2.0
         Records with a malformed ``deadline`` used to be silently skipped.
@@ -210,7 +216,8 @@ def at_risk_recipients(
     results = []
 
     for r in records:
-        dl = parse_iso_date(r.deadline, "deadline")
+        # Identity in the field name; see check_deadlines.
+        dl = parse_iso_date(r.deadline, r._deadline_field_name())
         days_remaining = (dl - today).days
         if r.deployment_pct < threshold_pct and 0 <= days_remaining <= days_window:
             results.append({

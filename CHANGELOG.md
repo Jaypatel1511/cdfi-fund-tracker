@@ -182,6 +182,91 @@ not have a success-shaped return.**
 
 ### Fixed
 
+- **Numeric fields accept every finite real number, not just `int` and
+  `float`.** The type gate was `isinstance(value, (int, float))`, which let
+  `numpy.float64` through only because that type happens to subclass `float`,
+  and refused `numpy.int64`, `numpy.int32`, `numpy.float32`, `decimal.Decimal`
+  and `fractions.Fraction` with `award_amount must be a number` — an assertion
+  that is false about a finite number, and about the exact value the README's
+  own constraints table said the field required.
+
+  It was reachable from this package's only documented workflow. A plain
+  integer dollar column read through pandas yields `numpy.int64` from `.iloc`,
+  `.at`, `.loc`, `Series.iloc` and `.sum()`, while `to_dict("records")` and
+  `itertuples()` coerce to Python `int` and survived — so whether a caller's
+  data loaded at all depended on which access pattern they reached for.
+  `deployment_pct=numpy.int64(1)`, a fully deployed record, was refused too.
+
+  The gate is now `numbers.Real` or `Decimal`, with `bool` excluded explicitly
+  (it is both `Real` and `Integral`, so without that clause
+  `Award(award_amount=True)` would construct as a $1.00 award). `Decimal` is
+  named separately because it is deliberately not registered as `numbers.Real`
+  — an ABC check alone would still have refused what is arguably the most
+  correct type for a currency field. `award_year` uses `numbers.Integral`: a
+  fractional year is not a year.
+
+  **Accepted values are coerced to built-ins** — `float` for the three
+  dollar/fraction fields, `int` for `award_year`. This extends existing
+  behaviour rather than introducing it; the fields have been reassigned through
+  `float()` since the validator existed, so `award_amount=1_500_000` has always
+  read back as `1500000.0`. Coercion rather than store-as-given because
+  `Decimal + float` raises `TypeError`, and every aggregation here sums these
+  fields — one `Decimal` award in a portfolio of floats would have aborted
+  `by_program()`, a failure that did not previously exist. Secondarily, `numpy`
+  scalars and `Decimal` are not JSON-serializable and `numpy.int64` is rejected
+  as a dict *key*, which is how `by_year()` returns `award_year`; nothing in
+  this package serializes, so storing them as passed would have failed in the
+  caller's code instead of here. The cost is that an exact
+  `Decimal("1500000.07")` stops being exact — unavoidable, since every
+  downstream computation is float arithmetic.
+
+  All four bounds checks still apply to the newly accepted types, and
+  `nan`, `inf`, `Decimal('NaN')`, `Decimal('Infinity')`, strings, `None`,
+  `complex` and `bool` are still rejected.
+
+- **A magnitude too large to represent as a float no longer escapes as
+  `OverflowError`.** `math.isfinite(10**400)` raises rather than returning
+  `False`, so `Award(award_amount=10**400)` left the constructor with an
+  `OverflowError` — not a `ValueError` at all, breaking this package's stated
+  convention that every constructor violation is a `ValueError`.
+  `Decimal('sNaN')` raised a `ValueError` that named no field. Both now raise
+  `ValueError` naming the field.
+
+- **`Recipient.programs_received` type-checks the container before iterating
+  it.** `None` — what a null CSV cell becomes — raised `TypeError`
+  (`'NoneType' object is not iterable`) from the loop, contradicting the
+  convention `parse_iso_date`'s docstring states outright: non-string input
+  raises `ValueError` precisely so a null cell surfaces "as the same error type
+  as every other constructor violation". A bare string `"CDFI_FA"` is iterable,
+  so it was rejected — but character by character, and the message reported the
+  offending value as `'C'`, a value the caller never wrote. `list`, `tuple` and
+  `set` are accepted; anything else raises `ValueError` naming the actual value.
+
+- **Batch compliance aborts now name the offending record.** Removing the
+  `except ValueError` handlers was right — the dataclasses are mutable, so
+  `record.deadline = "garbage"` still reaches the parse sites, and silently
+  reporting that record as "not at risk" is the under-counting this release
+  exists to remove. But the abort said only
+  `deadline must be YYYY-MM-DD, got 'garbage'`. With one bad record at index
+  347 of 500, `summary()`, `.at_risk()`, `.overdue()`, `check_deadlines()` and
+  `at_risk_recipients()` all aborted with that same text — no index, no
+  `recipient_id` — and with a placeholder repeated across a portfolio it could
+  not identify which record to fix. All four parse sites now carry the
+  identity: `deadline (recipient_id='R-0347') must be YYYY-MM-DD, got
+  'garbage'`. The batch still aborts on the first offender. Construction-time
+  messages are unchanged, where the caller has the record in hand.
+
+- **An inaccurate claim about commit `e438251` in `tests/test_schema.py`.** The
+  block comment said every test below it failed against the 0.2.0 build. It did
+  not: 14 of those 92 tests are positive controls that pass on both sides by
+  design, so that a guard cannot be satisfied by rejecting everything. Measured
+  by running that file's `db24cfc` state against an `e438251` checkout of
+  `cdfifund/`: **78 failed / 14 passed**, identically on 3.9.12 and 3.12.13.
+  The whole suite against the same checkout is **82 failed / 172 passed**, also
+  identical on both. A figure of 79 that circulated in an interim report
+  reproduces by no method and is off by one from the 78 above; it appears
+  nowhere in this repository and so required no correction here.
+
 - **README no longer describes the sample data as "24 realistic awards."** They
   are 24 **synthetic, invented** awards. No row corresponds to a real CDFI Fund
   award and none was sourced from the CDFI Fund.

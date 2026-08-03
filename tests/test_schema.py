@@ -95,11 +95,26 @@ class TestConstants:
 # ---------------------------------------------------------------------------
 # 0.2.0 fix-cycle regression tests.
 #
-# Every test below fails against commit e438251 (the 0.2.0 build) and passes
-# after the fix. They are written against BEHAVIOUR -- construct an invalid
-# value, require a raise -- not against the presence of a string in a docstring
-# or a markdown table. The test that missed B1 was a string-presence test: it
-# asserted `loan_fund` appeared in README.md and never once passed a bad value.
+# These are written against BEHAVIOUR -- construct an invalid value, require a
+# raise -- not against the presence of a string in a docstring or a markdown
+# table. The test that missed B1 was a string-presence test: it asserted
+# `loan_fund` appeared in README.md and never once passed a bad value.
+#
+# This block is NOT uniformly a set of tests that fail against the 0.2.0 build.
+# It deliberately mixes two kinds:
+#
+#   - Regression tests, which fail against commit e438251 and pass after.
+#   - Positive controls, which pass on BOTH sides on purpose -- "every valid
+#     type is accepted", "a leap day is accepted", "-inf was already rejected".
+#     They exist so a guard cannot be satisfied by rejecting everything, so
+#     they must not fail beforehand, and a claim that they do would be wrong.
+#
+# Measured, not asserted: running this file's db24cfc state against an e438251
+# checkout of `cdfifund/` gives 78 failed / 14 passed of the 92 tests below
+# this comment, identically on 3.9.12 and 3.12.13. An earlier revision of this
+# comment claimed *every* test below it failed, which was false for the 14
+# controls; a figure of 79 that appeared in an interim report does not
+# reproduce by any method and is off by one from the 78 measured here.
 # ---------------------------------------------------------------------------
 
 
@@ -168,6 +183,53 @@ class TestB1RecipientValidation:
 
     def test_empty_programs_received_is_allowed(self):
         _recipient(programs_received=[])()
+
+
+class TestProgramsReceivedContainerType:
+    """programs_received was type-checked only by iterating it.
+
+    Two consequences, both fixed in 0.2.0:
+
+    ``None`` -- what a null CSV cell becomes -- raised TypeError
+    ('NoneType' object is not iterable) from the loop, not ValueError. That
+    contradicts the convention parse_iso_date's docstring states explicitly:
+    non-string input raises ValueError so a null cell surfaces "as the same
+    error type as every other constructor violation". This field broke that
+    promise.
+
+    A bare string ``"CDFI_FA"`` is iterable, so it was rejected -- but
+    character by character, and the message reported the offending value as
+    ``'C'``. A caller who forgot the brackets got an error naming a value they
+    never wrote.
+    """
+
+    @pytest.mark.parametrize(
+        "bad", [None, 42, 3.5, True, object()],
+        ids=["None", "int", "float", "bool", "object"],
+    )
+    def test_non_container_raises_valueerror_not_typeerror(self, bad):
+        with pytest.raises(ValueError, match="programs_received"):
+            _recipient(programs_received=bad)()
+
+    def test_bare_string_names_the_whole_value_not_a_character(self):
+        with pytest.raises(ValueError) as exc:
+            _recipient(programs_received="CDFI_FA")()
+        msg = str(exc.value)
+        assert "'CDFI_FA'" in msg, msg
+        assert "'C'" not in msg, msg
+
+    def test_bare_string_is_rejected_even_when_it_is_a_valid_program(self):
+        """The string spells a real program code; it is still not a list."""
+        assert "CDFI_FA" in CDFI_PROGRAMS
+        with pytest.raises(ValueError, match="programs_received"):
+            _recipient(programs_received="CDFI_FA")()
+
+    @pytest.mark.parametrize(
+        "good", [["CDFI_FA"], ("CDFI_FA",), {"CDFI_FA"}, [], (), set()],
+        ids=["list", "tuple", "set", "empty_list", "empty_tuple", "empty_set"],
+    )
+    def test_list_tuple_and_set_are_all_accepted(self, good):
+        _recipient(programs_received=good)()
 
 
 class TestB2DateValidation:

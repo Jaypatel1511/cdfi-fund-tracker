@@ -206,3 +206,69 @@ class TestAtRiskSemanticReconciliation:
             ComplianceRecord(
                 "R-BAD", "CDFI_FA", 0.10, "not-a-date", "at_risk", "2025-01-01"
             )
+
+
+class TestBatchAbortIdentifiesTheRecord:
+    """A batch abort must name the record that caused it.
+
+    Removing the ``except ValueError`` handlers in 0.2.0 was correct -- the
+    dataclasses are mutable, so ``record.deadline = "garbage"`` reaches the
+    parse sites after construction, and silently reporting such a record as
+    "not at risk" is the under-counting this release exists to remove.
+
+    But the abort said only ``deadline must be YYYY-MM-DD, got 'garbage'``. With
+    one bad record at index 347 of 500 -- or a placeholder repeated across the
+    portfolio -- that message does not tell you which record to fix, and every
+    entry point aborts with the same text. The recipient_id is in hand at all
+    four parse sites; it now appears in the message.
+    """
+
+    @staticmethod
+    def _portfolio(bad_index=347, size=500):
+        from cdfifund.data.schema import ComplianceRecord
+
+        records = [
+            ComplianceRecord(
+                f"R-{i:04d}", "CDFI_FA", 0.10, "2030-01-01", "at_risk", "2025-01-01"
+            )
+            for i in range(size)
+        ]
+        # Reachable only post-construction; the dataclass is mutable.
+        records[bad_index].deadline = "garbage"
+        return records, records[bad_index].recipient_id
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda recs: ComplianceTracker(recs).summary(),
+            lambda recs: ComplianceTracker(recs).at_risk(),
+            lambda recs: ComplianceTracker(recs).overdue(),
+            lambda recs: check_deadlines(recs),
+            lambda recs: at_risk_recipients(recs),
+        ],
+        ids=["summary", "tracker.at_risk", "tracker.overdue",
+             "check_deadlines", "at_risk_recipients"],
+    )
+    def test_every_entry_point_names_the_offending_record(self, call):
+        records, bad_id = self._portfolio()
+        with pytest.raises(ValueError) as exc:
+            call(records)
+        msg = str(exc.value)
+        assert bad_id in msg, f"record identity missing from: {msg}"
+        assert "garbage" in msg, msg
+        assert "deadline" in msg, msg
+
+    def test_identity_distinguishes_a_repeated_placeholder(self):
+        """The case the finding turns on: same bad value, different records."""
+        records, _ = self._portfolio(bad_index=12, size=50)
+        records[40].deadline = "garbage"
+        with pytest.raises(ValueError) as exc:
+            check_deadlines(records)
+        # Aborts on the FIRST offender, and says which one it was.
+        assert "R-0012" in str(exc.value)
+        assert "R-0040" not in str(exc.value)
+
+    def test_still_raises_valueerror_not_a_new_type(self):
+        records, _ = self._portfolio(bad_index=0, size=3)
+        with pytest.raises(ValueError):
+            at_risk_recipients(records)
