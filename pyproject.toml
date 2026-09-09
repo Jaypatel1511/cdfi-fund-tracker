@@ -24,8 +24,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Jaypatel1511/cdfi-fund-tracker"
+Homepage = "https://jaypatel1511.github.io/cdfi-superpowers/"
 Repository = "https://github.com/Jaypatel1511/cdfi-fund-tracker"
+Documentation = "https://github.com/Jaypatel1511/cdfi-fund-tracker#readme"
+Issues = "https://github.com/Jaypatel1511/cdfi-fund-tracker/issues"
+Changelog = "https://github.com/Jaypatel1511/cdfi-fund-tracker/blob/main/CHANGELOG.md"
 
 [tool.pytest.ini_options]
 # --import-mode=importlib is required, not cosmetic. Under the default "prepend"
